@@ -1,0 +1,15 @@
+schema = 1
+id = "spotify"
+name = "Spotify"
+version = "0.1.0"
+description = "Plays Spotify in Tern: a player block and palette commands, backed by a Rust daemon built on librespot."
+icon = "play"
+host = "host.luau"
+window = "window.luau"
+styles = ["spotify.css"]
+
+[[blocks]]
+id = "player"
+title = "Spotify"
+icon = "play"
+palette = true
