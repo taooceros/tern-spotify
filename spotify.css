@@ -226,7 +226,15 @@
 
 [data-surface='plugin.spotify.player'] .sp-hero-acts {
 	display: flex;
+	align-items: center;
+	gap: 12px;
 	padding-top: 8px;
+}
+
+[data-surface='plugin.spotify.player'] .sp-hero-acts .sp-btn {
+	width: 32px;
+	height: 32px;
+	font-size: 18px;
 }
 
 [data-surface='plugin.spotify.player'] .sp-hero-play {

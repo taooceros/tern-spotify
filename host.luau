@@ -940,8 +940,9 @@ local function art(state: State, url: string?, kind: string, name: string, px: n
 end
 
 -- An opened page's header, as the desktop app draws it: cover, kind, name,
--- who and how many, and ▶ to play the whole page.
-local function hero_view(state: State, view: View): Node?
+-- who and how many, ▶ to play the whole page, and ⇄, the shuffle the
+-- player bar shows too (on, ▶ plays the page shuffled).
+local function hero_view(state: State, view: View, s: Status): Node?
 	local head = view.head
 	if head == nil then
 		return nil
@@ -961,6 +962,7 @@ local function hero_view(state: State, view: View): Node?
 				text = "▶",
 				actions = { click = "play_page" },
 			}),
+			button("shuffle", "⇄", "shuffle", if s.shuffle then "Shuffle on (s)" else "Shuffle off (s)", s.shuffle),
 		}))
 	end
 	return ui.el("div", { key = "hero", class = "sp-hero" }, {
@@ -1036,7 +1038,7 @@ local function list_view(state: State, view: View, s: Status, cx: BlockCx): Node
 	p.empty = {
 		ui.span(if view.busy then "Loading…" elseif view.search then "No results." else "Nothing here.", "muted"),
 	}
-	local hero = hero_view(state, view)
+	local hero = hero_view(state, view, s)
 	p.max = { lines = math.max(4, cx.rows - 16 - (if hero then HERO_LINES else 0)) }
 	list.p = p
 

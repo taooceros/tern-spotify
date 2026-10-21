@@ -16,7 +16,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
+use librespot_connect::{
+    ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options, PlayingTrack, Spirc,
+};
 use librespot_core::{
     Session, SessionConfig, SpotifyUri, authentication::Credentials, cache::Cache, config::DeviceType,
     error::ErrorKind,
@@ -549,10 +551,19 @@ impl Engine {
         }
     }
 
+    /// Shuffle on or off. The Connect device applies it only while active,
+    /// so an inactive one keeps it for the next `load`.
     pub fn shuffle(&self, on: bool) -> Result<(), String> {
-        self.spirc()?.shuffle(on).map_err(|e| e.to_string())
+        let spirc = self.spirc()?;
+        if !self.active() {
+            lock(&self.0.live).shuffle = on;
+            return Ok(());
+        }
+        spirc.shuffle(on).map_err(|e| e.to_string())
     }
 
+    /// Repeat off, the context, or the track; kept for the next `load` while
+    /// inactive, as `shuffle` is.
     pub fn repeat(&self, mode: &str) -> Result<(), String> {
         let spirc = self.spirc()?;
         let (context, track) = match mode {
@@ -561,12 +572,20 @@ impl Engine {
             "track" => (true, true),
             _ => return Err(format!("unknown repeat mode {mode:?} (off, context, track)")),
         };
+        if !self.active() {
+            let mut live = lock(&self.0.live);
+            live.repeat = context;
+            live.repeat_track = track;
+            return Ok(());
+        }
         spirc.repeat_track(track).map_err(|e| e.to_string())?;
         spirc.repeat(context).map_err(|e| e.to_string())
     }
 
     /// Plays `uri` here: a track alone, or a context (album, playlist, artist,
-    /// liked songs) from its first track or from `track` in it.
+    /// liked songs) from its first track or from `track` in it. A context
+    /// keeps the shuffle and repeat set now, as in the desktop app: shuffled,
+    /// it starts at a random track (or `track`) and the rest follow shuffled.
     pub fn load(&self, uri: &str, track: Option<&str>) -> Result<(), String> {
         if !uri.starts_with("spotify:") {
             return Err(format!("not a Spotify URI: {uri:?}"));
@@ -577,9 +596,14 @@ impl Engine {
         if !self.active() {
             spirc.activate().map_err(|e| e.to_string())?;
         }
+        let (shuffle, repeat, repeat_track) = {
+            let live = lock(&self.0.live);
+            (live.shuffle, live.repeat, live.repeat_track)
+        };
         let options = LoadRequestOptions {
             start_playing: true,
             playing_track: track.map(|t| PlayingTrack::Uri(t.to_owned())),
+            context_options: Some(LoadContextOptions::Options(Options { shuffle, repeat, repeat_track })),
             ..LoadRequestOptions::default()
         };
         let request = if uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:") {
