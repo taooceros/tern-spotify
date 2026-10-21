@@ -9,6 +9,7 @@ mod catalog;
 mod engine;
 #[cfg(target_os = "macos")]
 mod nowplaying;
+mod output;
 
 use std::{
     path::PathBuf,

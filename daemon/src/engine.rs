@@ -28,7 +28,7 @@ use librespot_metadata::{
 use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::{
     audio_backend,
-    config::{AudioFormat, Bitrate, NormalisationType, PlayerConfig, VolumeCtrl},
+    config::{AudioFormat, Bitrate, NormalisationMethod, NormalisationType, PlayerConfig, VolumeCtrl},
     mixer::{self, Mixer, MixerConfig},
     player::{Player, PlayerEvent},
 };
@@ -286,16 +286,31 @@ impl Engine {
         let session = Session::new(session_config.clone(), Some(cache.clone()));
         let player = Player::new(
             // What the desktop client plays a Premium account at: "Very high"
-            // quality (320 kbit/s) with loudness normalisation on.
+            // quality (320 kbit/s; Spotify's lossless files need keys librespot
+            // can't get) with loudness normalisation on. `Basic` normalisation
+            // only scales a track, never past its peak, as the desktop app's
+            // "Normal" level does; librespot's default (`Dynamic`) runs every
+            // sample through a limiter, which squashes the peaks of quiet,
+            // dynamic recordings it turns up.
             PlayerConfig {
                 bitrate: Bitrate::Bitrate320,
                 normalisation: true,
                 normalisation_type: NormalisationType::Auto,
+                normalisation_method: NormalisationMethod::Basic,
                 ..PlayerConfig::default()
             },
             session.clone(),
             mixer.get_soft_volume(),
-            move || backend(None, AudioFormat::default()),
+            // Our own output (see output.rs): float samples to the device at its
+            // own rate, resampled properly when that isn't 44.1 kHz. librespot's
+            // rodio backend (in float) when the device can't be opened that way.
+            move || match crate::output::Output::open() {
+                Ok(output) => Box::new(output),
+                Err(e) => {
+                    log::warn!("audio output: {e}; using librespot's rodio output");
+                    backend(None, AudioFormat::F32)
+                }
+            },
         );
         let events = player.get_player_event_channel();
 

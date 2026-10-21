@@ -54,11 +54,18 @@ that runs the same `cargo build`.
   page follows the song as playback moves on.
 - The keyboard's media keys, AirPods, Control Center and the lock screen
   show and control what plays, as they do the desktop app.
-- Playback is at 320 kbit/s (Premium's "Very high"), with loudness
-  normalisation on. Played songs are cached (up to 2 GB), so a replay
-  starts at once. The volume slider is a log curve over 30 dB (50% ≈ −15
-  dB). librespot's default 60 dB curve puts 50% at −30 dB, far quieter
-  than the desktop app.
+- Playback is at 320 kbit/s Ogg Vorbis (Premium's "Very high"), the best
+  librespot can get: Spotify's lossless FLAC files need decryption keys it
+  can't obtain. Loudness normalisation is on and only scales a track,
+  never past its peak, like the desktop app's "Normal" level (librespot's
+  default runs a limiter on every sample). Samples stay 32-bit float to
+  the output device. A device at 44.1 kHz gets them untouched; any other
+  rate (a Mac's speakers run at 48 kHz) gets them through an FFT resampler
+  (`daemon/src/output.rs`), where librespot's own output resamples by
+  linear interpolation and rounds to 16 bits. Played songs are cached (up
+  to 2 GB), so a replay starts at once. The volume slider is a log curve
+  over 30 dB (50% ≈ −15 dB). librespot's default 60 dB curve puts 50% at
+  −30 dB, far quieter than the desktop app.
 - Tern is a real Spotify Connect device. Phones and the desktop app can send
   playback to it, and **Play here** (`t`) takes over playback from whatever
   device is playing now.
