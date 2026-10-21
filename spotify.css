@@ -1,20 +1,54 @@
-/* The Spotify player block: now playing (cover, track, controls) over a
-   list to play from. */
+/* The Spotify player block: a list to play from over the player bar
+   (the song, the transport and seek bar, lyrics and volume). */
 
+/* Three groups, as the desktop app's bar; a narrow pane wraps the side
+   group, then the middle one, onto lines of their own. */
 [data-surface='plugin.spotify.player'] .sp-now {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 16px;
-	padding: 4px 2px 10px;
+	gap: 8px 16px;
+	padding: 8px 2px;
+	border-top: 1px solid color-mix(in srgb, var(--t1) 10%, transparent);
 	font-family: var(--sans);
+}
+
+[data-surface='plugin.spotify.player'] .sp-bar-song {
+	display: flex;
+	flex: 1 1 180px;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+[data-surface='plugin.spotify.player'] .sp-bar-mid {
+	display: flex;
+	flex: 2 1 220px;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 2px;
+	min-width: 0;
+}
+
+[data-surface='plugin.spotify.player'] .sp-bar-side {
+	display: flex;
+	flex: 1 1 auto;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+}
+
+/* The bar's volume: thinner segments, so the three groups share a line. */
+[data-surface='plugin.spotify.player'] .sp-now .sp-vseg {
+	width: 4px;
 }
 
 [data-surface='plugin.spotify.player'] .sp-cover {
 	flex: none;
-	width: 112px;
-	height: 112px;
+	width: 56px;
+	height: 56px;
 	overflow: hidden;
-	border-radius: 8px;
+	border-radius: 4px;
 	background: var(--l1);
 }
 
@@ -23,14 +57,14 @@
 	align-items: center;
 	justify-content: center;
 	color: var(--t3);
-	font-size: 40px;
+	font-size: 24px;
 }
 
 [data-surface='plugin.spotify.player'] .sp-info {
 	display: flex;
 	flex: 1;
 	flex-direction: column;
-	gap: 3px;
+	gap: 1px;
 	min-width: 0;
 }
 
@@ -44,28 +78,26 @@
 
 [data-surface='plugin.spotify.player'] .sp-title {
 	color: var(--t1);
-	font-size: 16px;
+	font-size: 14px;
 	font-weight: 600;
 }
 
 [data-surface='plugin.spotify.player'] .sp-artists {
 	color: var(--t2, var(--t1));
-	font-size: 13px;
+	font-size: 12px;
 }
 
 [data-surface='plugin.spotify.player'] .sp-album {
 	color: var(--t3);
-	font-size: 12px;
+	font-size: 11px;
 }
 
-/* The buttons, then the volume group; a narrow pane wraps the volume group
-   onto its own line instead of pushing it past the edge. */
+/* Shuffle, previous, play, next, repeat: centred over the seek bar. */
 [data-surface='plugin.spotify.player'] .sp-controls {
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
-	gap: 6px 4px;
-	padding-top: 4px;
+	justify-content: center;
+	gap: 6px;
 }
 
 [data-surface='plugin.spotify.player'] .sp-btn {
@@ -73,12 +105,26 @@
 	align-items: center;
 	justify-content: center;
 	min-width: 30px;
-	height: 26px;
+	height: 30px;
 	padding: 0 6px;
-	border-radius: 6px;
-	background: var(--l1);
-	color: var(--t1);
+	border-radius: 15px;
+	background: transparent;
+	color: var(--t2, var(--t1));
 	font-size: 14px;
+}
+
+[data-surface='plugin.spotify.player'] .sp-btn.sp-play {
+	width: 34px;
+	min-width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	background: var(--t1);
+	color: var(--l0, #fff);
+}
+
+[data-surface='plugin.spotify.player'] .sp-btn.sp-play:hover {
+	background: var(--t1);
+	transform: scale(1.06);
 }
 
 [data-surface='plugin.spotify.player'] .sp-btn:hover {

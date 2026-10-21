@@ -693,12 +693,14 @@ local function connecting_view(s: Status): Node
 	return ui.progress(nil, label)
 end
 
+local COVER_PX = 56
+
 local function cover_view(state: State, s: Status): Node
 	local t = s.track
 	local blob = if t and t.cover then state.covers[t.cover :: string] else nil
 	if blob then
 		return ui.el("div", { key = "cover", class = "sp-cover" }, {
-			ui.node("image", { blob = blob, alt = if t then t.album else "", w = 112, h = 112 }),
+			ui.node("image", { blob = blob, alt = if t then t.album else "", w = COVER_PX, h = COVER_PX }),
 		})
 	end
 	return ui.el("div", { key = "cover", class = "sp-cover sp-cover-empty", text = "♪" })
@@ -780,11 +782,14 @@ local function seek_view(pos: number, dur: number): Node
 	})
 end
 
+-- The player bar under the browser, laid out as the desktop app's: the
+-- song (cover, name, artists, album, ♡) on the left, the transport over the
+-- seek bar in the middle, lyrics and volume on the right.
 local function now_view(state: State, s: Status): Node
 	local t = s.track
 	local info: { Node } = {}
 	if t then
-		table.insert(info, ui.el("div", { class = "sp-title", text = t.name }))
+		table.insert(info, ui.el("div", { class = "sp-title", text = t.name, title = t.name }))
 		-- Each artist and the album open in the browser, as in the desktop app.
 		local names: { Node } = {}
 		for i, name in t.artists do
@@ -799,34 +804,54 @@ local function now_view(state: State, s: Status): Node
 				link("album", t.album, t.album_uri, "sp-album-name"),
 			}))
 		end
-		local dur = t.duration_ms
-		local pos = math.min(s.position_ms, if dur > 0 then dur else s.position_ms)
-		table.insert(info, seek_view(pos, dur))
 	else
 		table.insert(info, ui.el("div", { class = "sp-title", text = "Nothing playing" }))
-		table.insert(info, ui.el("div", { class = "sp-artists", text = "Pick something below, or search with /." }))
+		table.insert(info, ui.el("div", { class = "sp-artists", text = "Pick something above, or search with /." }))
 	end
 	local play_label = if s.playing then "⏸" else "▶"
 	local view = top(state)
 	local saved = t ~= nil and state.saved_uri == (t :: common.Track).uri and state.saved == true
-	table.insert(info, ui.el("div", { key = "controls", class = "sp-controls" }, {
-		button("prev", "⏮", "prev", "Previous (p)"),
-		button("toggle", play_label, "toggle", if s.playing then "Pause (Space)" else "Play (Space)"),
-		button("next", "⏭", "next", "Next (n)"),
-		button("shuffle", "⇄", "shuffle", if s.shuffle then "Shuffle on (s)" else "Shuffle off (s)", s.shuffle),
-		button(
-			"repeat",
-			if s.repeat_mode == "track" then "↻1" else "↻",
-			"repeat",
-			(REPEAT_LABEL[s.repeat_mode] or "Repeat") .. " (r)",
-			s.repeat_mode ~= "off"
-		),
-		button("save", if saved then "♥" else "♡", "save", if saved then "In Liked Songs (f)" else "Save to Liked Songs (f)", saved),
-		button("lyrics", "♫", "lyrics", "Lyrics (y)", view ~= nil and view.lyrics),
-		volume_view(state),
-	}))
-	local kids: { Node } = { cover_view(state, s), ui.el("div", { class = "sp-info" }, info) }
-	return ui.el("div", { key = "now", class = "sp-now" }, kids)
+	local song: { Node } = { cover_view(state, s), ui.el("div", { key = "info", class = "sp-info" }, info) }
+	if t then
+		local known = state.saved_uri == (t :: common.Track).uri and state.saved ~= nil
+		table.insert(song, button("save", if saved then "♥" else "♡", "save",
+			if not known then "Checking Liked Songs…" elseif saved then "In Liked Songs (f)" else "Save to Liked Songs (f)", saved))
+	end
+	local middle: { Node } = {
+		ui.el("div", { key = "controls", class = "sp-controls" }, {
+			button("shuffle", "⇄", "shuffle", if s.shuffle then "Shuffle on (s)" else "Shuffle off (s)", s.shuffle),
+			button("prev", "⏮", "prev", "Previous (p)"),
+			ui.el("button", {
+				key = "toggle",
+				class = "sp-btn sp-play",
+				title = if s.playing then "Pause (Space)" else "Play (Space)",
+				aria = if s.playing then "Pause" else "Play",
+				text = play_label,
+				actions = { click = "toggle" },
+			}),
+			button("next", "⏭", "next", "Next (n)"),
+			button(
+				"repeat",
+				if s.repeat_mode == "track" then "↻1" else "↻",
+				"repeat",
+				(REPEAT_LABEL[s.repeat_mode] or "Repeat") .. " (r)",
+				s.repeat_mode ~= "off"
+			),
+		}),
+	}
+	if t then
+		local dur = t.duration_ms
+		local pos = math.min(s.position_ms, if dur > 0 then dur else s.position_ms)
+		table.insert(middle, seek_view(pos, dur))
+	end
+	return ui.el("div", { key = "now", class = "sp-now" }, {
+		ui.el("div", { key = "song", class = "sp-bar-song" }, song),
+		ui.el("div", { key = "mid", class = "sp-bar-mid" }, middle),
+		ui.el("div", { key = "side", class = "sp-bar-side" }, {
+			button("lyrics", "♫", "lyrics", "Lyrics (y)", view ~= nil and view.lyrics),
+			volume_view(state),
+		}),
+	})
 end
 
 local KIND_LABEL: { [string]: string } = {
@@ -1213,11 +1238,12 @@ local block: BlockDef<State> = {
 			return { main = ui.col({ connecting_view(s) }) }
 		end
 		local view = top(state)
-		local parts: { Node } = { now_view(state, s) }
+		local parts: { Node } = {}
 		if view then
 			table.insert(parts, list_view(state, view, s, cx))
 		end
-		return { main = ui.col(parts), dock = dock_view(state, s) }
+		-- The player bar sits at the bottom, above the device line.
+		return { main = ui.col(parts), dock = ui.col({ now_view(state, s), dock_view(state, s) }) }
 	end,
 
 	key = function(state, key, _cx)

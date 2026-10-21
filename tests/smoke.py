@@ -298,7 +298,12 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         print(f"PASS: ⏎ opens the artist; a plays it ({status['track']['name']!r} by {status['track']['artists']})")
 
         dur = status["track"]["duration_ms"]
-        ctl(f"click {MAIN} .sp-seek-hit[title='Seek to {clock((29.5 / 60) * dur)}']")
+        hit = f"{DOCK} .sp-seek-hit[title='Seek to {clock((29.5 / 60) * dur)}']"
+        deadline = time.monotonic() + 10
+        while not ctl(f"tree {hit}")["nodes"]:
+            assert time.monotonic() < deadline, ("no seek target", hit, texts(f"{DOCK} .sp-seek"))
+            time.sleep(0.2)
+        ctl(f"click {hit}")
         status = wait_status(lambda s: abs(s["position_ms"] - dur / 2) < 4000, "clicking mid-bar seeks to the middle")
         print(f"PASS: clicking the seek bar's middle seeks to {status['position_ms'] / 1000:.0f} s of {dur / 1000:.0f} s")
 
@@ -328,12 +333,12 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         assert not any("Lyrics:" in t for t in texts(TRAIL)), texts(TRAIL)
 
         track = api("/status")["track"]
-        ctl(f"click {MAIN} .sp-artist.sp-link")
+        ctl(f"click {DOCK} .sp-artist.sp-link")
         wait_text(TRAIL, f"› {track['artists'][0]}")
         keys("Backspace")
         wait_status(lambda s: s["track"] and s["track"].get("album_uri"), "the album's URI arrives")
         time.sleep(1.2)
-        ctl(f"click {MAIN} .sp-album-name.sp-link")
+        ctl(f"click {DOCK} .sp-album-name.sp-link")
         wait_text(TRAIL, track["album"])
         wait_text(f"{MAIN} .sp-hero-label", "")
         nums = texts(f"{MAIN} .sp-num")
@@ -351,33 +356,34 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
 
         uri = track["uri"]
         was = api(f"/saved?uri={uri}")["saved"]
-        wait_text(f"{MAIN} .sp-btn", "♥" if was else "♡")
-        ctl('type "f"')
-        try:
-            wait_text(f"{MAIN} .sp-btn", "♡" if was else "♥")
-            deadline = time.monotonic() + 10
-            while api(f"/saved?uri={uri}")["saved"] == was:
-                assert time.monotonic() < deadline, "f didn't change Liked Songs"
-                time.sleep(0.3)
-        finally:
+        def toggled_to(on):
             ctl('type "f"')
             deadline = time.monotonic() + 10
-            while api(f"/saved?uri={uri}")["saved"] != was:
-                assert time.monotonic() < deadline, f"f didn't put {uri} back as it was"
+            while api(f"/saved?uri={uri}")["saved"] != on:
+                assert time.monotonic() < deadline, f"f didn't set Liked Songs to {on}"
                 time.sleep(0.3)
+        try:
+            # The block asks /saved once per track; ♡ waits for that answer.
+            time.sleep(1.5)
+            toggled_to(not was)
+            wait_text(f"{DOCK} .sp-btn", "♥" if not was else "♡")
+            toggled_to(was)
+        finally:
+            if api(f"/saved?uri={uri}")["saved"] != was:
+                api(f"/save?uri={uri}&on={str(was).lower()}", "POST")
         print(f"PASS: f toggles ♡ (Liked Songs: {was} → {not was} → {was})")
 
         keys("Space")
         wait_status(lambda s: not s["playing"], "Space pauses")
         print("PASS: Space pauses")
 
-        volume = f"{MAIN} .sp-volume"
+        volume = f"{DOCK} .sp-volume"
         before = api("/status")["volume"]
         try:
-            ctl(f"click {MAIN} .sp-vseg[title='Volume 30%']")
+            ctl(f"click {DOCK} .sp-vseg[title='Volume 30%']")
             wait_text(volume, "30%", timeout=2)
             wait_status(lambda s: s["volume"] == 30, "clicking the 30 % segment sets the volume")
-            lit = len(ctl(f"tree {MAIN} .sp-vseg.sp-on")["nodes"])
+            lit = len(ctl(f"tree {DOCK} .sp-vseg.sp-on")["nodes"])
             assert lit == 6, f"{lit} segments lit at 30 %, not 6"
             ctl("shot spotify-volume")
             ctl('type "7"')
@@ -398,8 +404,9 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         time.sleep(1.5)
         x, _, w, _ = ctl(f"dump {MAIN}")["elements"][0]["rect"]
         right = x + w
-        for part in (".sp-vbar", ".sp-vol", ".sp-seek", ".sp-btn", ".sp-list-head .sf-badge"):
-            boxes = [e["rect"] for e in ctl(f"dump {MAIN} {part}")["elements"]]
+        for part in (f"{DOCK} .sp-vbar", f"{DOCK} .sp-vol", f"{DOCK} .sp-seek", f"{DOCK} .sp-btn",
+                     f"{MAIN} .sp-list-head .sf-badge"):
+            boxes = [e["rect"] for e in ctl(f"dump {part}")["elements"]]
             assert boxes, f"no {part} in the narrow pane"
             past = [b for b in boxes if b[0] + b[2] > right + 1]
             assert not past, f"{part} ends past the pane's right edge ({right:.0f} px): {past}"

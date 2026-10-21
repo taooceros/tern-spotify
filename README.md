@@ -27,8 +27,10 @@ that runs the same `cargo build`.
   with Spotify** (or ⏎). Spotify's page opens in your browser. After you
   approve, the daemon keeps a reusable credential in the plugin's data
   folder and signs in on its own from then on.
-- The block shows the track, artists, album, cover and progress, the
-  controls, and a browser below. It starts at **Your Library**: Liked Songs,
+- The block is a browser over a player bar laid out like the desktop app's:
+  the song (cover, name, artists, album, ♡) on the left, shuffle, previous,
+  play, next and repeat over the seek bar in the middle, lyrics and volume
+  on the right; a narrow pane wraps its parts. The browser starts at **Your Library**: Liked Songs,
   then your playlists, albums and artists, most recently used first, as in
   the desktop app's sidebar. Every row shows its cover (artists' photos
   round), its name over its artists or owner, and its length. ⏎ (or a
@@ -43,7 +45,7 @@ that runs the same `cargo build`.
 - Covers load from Spotify's CDN a few at a time: the playing song's first,
   then the page's, then its rows' from the chosen one on, so a long
   playlist fills in where you look. Rows use Spotify's 64 px thumbnails.
-- In Now Playing, click an artist or the album to open it, click anywhere
+- In the player bar, click an artist or the album to open it, click anywhere
   on the progress bar to seek there, ♡ (`f`) saves the song to Liked Songs,
   and ♫ (`y`) shows its lyrics. Synced lyrics keep the line being sung
   highlighted and centred, and clicking a line seeks to it. When Spotify
