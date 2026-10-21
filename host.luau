@@ -30,8 +30,13 @@ local SEEK_MS = 10000
 local VOLUME_STEP = 5
 -- The volume bar: this many segments, each VOLUME_STEP percent.
 local VOLUME_SEGMENTS = 100 // VOLUME_STEP
--- A volume just set shows at once; the daemon reports it within this long.
-local VOLUME_PENDING_MS = 2000
+-- A command's effect shows at once (`expect`). The daemon's status counts
+-- as reporting it only from SETTLE_MS on (sooner, an earlier command may
+-- still be on its way); one it never reports goes back after PENDING_MS.
+local SETTLE_MS = 600
+local PENDING_MS = 3000
+-- A seek counts as reported when the daemon's position is this close.
+local SEEK_SLACK_MS = 1500
 -- Images (covers, photos) kept as blobs; past this many, those the playing
 -- track and the page no longer show are dropped.
 local MAX_IMAGES = 600
@@ -79,6 +84,9 @@ type View = {
 	track_uri: string?,
 }
 
+-- A Status field's value set by a command from this block, and when.
+type Pending = { value: any, at: number }
+
 type State = {
 	cx: BlockCx,
 	alive: boolean,
@@ -93,9 +101,8 @@ type State = {
 	library_loaded: boolean,
 	-- The last refused command, until the next one succeeds.
 	flash: string?,
-	-- A volume set from this block, shown until the daemon reports it.
-	volume_pending: number?,
-	volume_pending_at: number,
+	-- Status fields set from this block that the daemon hasn't reported yet.
+	pending: { [string]: Pending },
 	-- What unmute goes back to.
 	unmute_to: number?,
 	-- `?`: the dock lists every key instead of the short line.
@@ -118,6 +125,43 @@ local CONTAINERS: { [string]: boolean } = { album = true, artist = true, playlis
 
 local function top(state: State): View?
 	return state.views[#state.views]
+end
+
+-- The daemon's status with what this block's commands set and the daemon
+-- hasn't reported yet. Drops what it reported, or never will.
+local function shown(state: State): Status?
+	local s = state.status
+	if s == nil or next(state.pending) == nil then
+		return s
+	end
+	local now = tern.now()
+	local daemon = s :: any
+	local out = table.clone(s) :: any
+	for field, p in state.pending do
+		if field ~= "position_ms" then
+			local age = now - p.at
+			if age >= PENDING_MS or (age >= SETTLE_MS and daemon[field] == p.value) then
+				state.pending[field] = nil
+			else
+				out[field] = p.value
+			end
+		end
+	end
+	local seek = state.pending.position_ms
+	if seek then
+		local age = now - seek.at
+		-- A position set here moves on while the song (as shown) plays.
+		local at = seek.value + (if out.playing then age else 0)
+		if s.track then
+			at = math.min(at, (s.track :: common.Track).duration_ms)
+		end
+		if age >= PENDING_MS or (age >= SETTLE_MS and math.abs(s.position_ms - at) < SEEK_SLACK_MS) then
+			state.pending.position_ms = nil
+		else
+			out.position_ms = at
+		end
+	end
+	return out :: Status
 end
 
 local function render(state: State)
@@ -259,7 +303,7 @@ local function took_status(state: State, s: Status)
 	if cover and not state.covers[cover] and not state.fetching[cover] then
 		queue_images(state)
 	end
-	after_status(state, s)
+	after_status(state, shown(state) :: Status)
 	if s.phase == "ready" then
 		if not state.library_loaded then
 			state.library_loaded = true
@@ -340,11 +384,15 @@ local function poll(state: State, again: boolean)
 end
 
 -- Sends a command; its reply is the status right after, and a read shortly
--- after shows its effect.
-local function send(state: State, method: string, path: string, body: any?)
+-- after shows its effect. `refused` runs when the daemon refuses it or
+-- doesn't answer.
+local function send(state: State, method: string, path: string, body: any?, refused: (() -> ())?)
 	common.call(method, path, body, function(reply: Reply, _)
 		if not state.alive then
 			return
+		end
+		if not reply.ok and refused then
+			refused()
 		end
 		if reply.ok then
 			state.flash = nil
@@ -358,6 +406,26 @@ local function send(state: State, method: string, path: string, body: any?)
 		tern.timer(350, function()
 			poll(state, false)
 		end)
+	end)
+end
+
+-- Sends a command whose effect is known: `changes` (Status fields) show at
+-- once, and go back to the daemon's when it refuses the command.
+local function expect(state: State, changes: { [string]: any }, path: string)
+	local mine: { [string]: Pending } = {}
+	local now = tern.now()
+	for field, value in changes do
+		local p: Pending = { value = value, at = now }
+		state.pending[field] = p
+		mine[field] = p
+	end
+	render(state)
+	send(state, "POST", path, nil, function()
+		for field, p in mine do
+			if state.pending[field] == p then
+				state.pending[field] = nil
+			end
+		end
 	end)
 end
 
@@ -706,23 +774,10 @@ local function cover_view(state: State, s: Status): Node
 	return ui.el("div", { key = "cover", class = "sp-cover sp-cover-empty", text = "♪" })
 end
 
--- The volume to show: one just set here until the daemon reports it (or
--- the wait runs out), else the daemon's.
-local function shown_volume(state: State): number
-	local pending = state.volume_pending
-	local s = state.status
-	if pending and s and s.volume == pending then
-		state.volume_pending = nil
-	elseif pending and tern.now() - state.volume_pending_at < VOLUME_PENDING_MS then
-		return pending
-	end
-	return if s then s.volume else 0
-end
-
 -- 🔈 mutes and unmutes; then one segment per VOLUME_STEP, lit up to the
 -- volume, each setting it to its own level when clicked.
-local function volume_view(state: State): Node
-	local v = shown_volume(state)
+local function volume_view(s: Status): Node
+	local v = s.volume
 	local glyph = if v == 0 then "🔇" elseif v < 34 then "🔈" elseif v < 67 then "🔉" else "🔊"
 	local segments: { Node } = {}
 	for i = 1, VOLUME_SEGMENTS do
@@ -760,7 +815,9 @@ end
 -- Columns of the seek bar: clicking one seeks to its share of the track.
 local SEEK_COLUMNS = 60
 
--- The progress bar under an invisible row of SEEK_COLUMNS targets.
+-- The progress bar under an invisible row of SEEK_COLUMNS targets, then the
+-- time. The time sits outside the bar's box: inside it, the targets would
+-- span it too, and a click would seek short of where it lands on the bar.
 local function seek_view(pos: number, dur: number): Node
 	local label = common.clock(pos) .. " / " .. common.clock(dur)
 	local targets: { Node } = {}
@@ -777,8 +834,11 @@ local function seek_view(pos: number, dur: number): Node
 		end
 	end
 	return ui.el("div", { key = "seek", class = "sp-seek" }, {
-		ui.progress(if dur > 0 then pos / dur else 0, label),
-		ui.el("div", { key = "hits", class = "sp-seek-hits" }, targets),
+		ui.el("div", { key = "bar", class = "sp-seek-bar" }, {
+			ui.progress(if dur > 0 then pos / dur else 0, ""),
+			ui.el("div", { key = "hits", class = "sp-seek-hits" }, targets),
+		}),
+		ui.el("span", { key = "time", class = "sp-seek-time", text = label }),
 	})
 end
 
@@ -827,7 +887,9 @@ local function now_view(state: State, s: Status): Node
 				title = if s.playing then "Pause (Space)" else "Play (Space)",
 				aria = if s.playing then "Pause" else "Play",
 				text = play_label,
-				actions = { click = "toggle" },
+				-- Not "toggle": Tern takes that name for its own event, and the
+				-- block never sees the click.
+				actions = { click = "play_pause" },
 			}),
 			button("next", "⏭", "next", "Next (n)"),
 			button(
@@ -849,7 +911,7 @@ local function now_view(state: State, s: Status): Node
 		ui.el("div", { key = "mid", class = "sp-bar-mid" }, middle),
 		ui.el("div", { key = "side", class = "sp-bar-side" }, {
 			button("lyrics", "♫", "lyrics", "Lyrics (y)", view ~= nil and view.lyrics),
-			volume_view(state),
+			volume_view(s),
 		}),
 	})
 end
@@ -1069,30 +1131,34 @@ local function set_volume(state: State, v: number)
 	if v > 0 then
 		state.unmute_to = nil
 	end
-	state.volume_pending = v
-	state.volume_pending_at = tern.now()
-	render(state)
-	send(state, "POST", "/volume?percent=" .. v)
+	expect(state, { volume = v }, "/volume?percent=" .. v)
 end
 
 local function do_action(state: State, act: string, value: string?)
-	local s = state.status
-	if act == "toggle" then
-		send(state, "POST", "/toggle")
+	local s = shown(state)
+	if act == "play_pause" and s then
+		if s.playing then
+			-- Paused, the song stays where it is now.
+			expect(state, { playing = false, position_ms = s.position_ms }, "/pause")
+		else
+			-- On another device, /play takes the playback over.
+			expect(state, { playing = true, active = true }, "/play")
+		end
 	elseif act == "next" then
 		send(state, "POST", "/next")
 	elseif act == "prev" then
 		send(state, "POST", "/prev")
 	elseif act == "shuffle" and s then
-		send(state, "POST", "/shuffle?on=" .. tostring(not s.shuffle))
+		expect(state, { shuffle = not s.shuffle }, "/shuffle?on=" .. tostring(not s.shuffle))
 	elseif act == "repeat" and s then
-		send(state, "POST", "/repeat?mode=" .. (REPEAT_NEXT[s.repeat_mode] or "off"))
+		local mode = REPEAT_NEXT[s.repeat_mode] or "off"
+		expect(state, { repeat_mode = mode }, "/repeat?mode=" .. mode)
 	elseif (act == "vup" or act == "vdown") and s then
-		set_volume(state, shown_volume(state) + (if act == "vup" then VOLUME_STEP else -VOLUME_STEP))
+		set_volume(state, s.volume + (if act == "vup" then VOLUME_STEP else -VOLUME_STEP))
 	elseif act == "volume" and value and tonumber(value) then
 		set_volume(state, tonumber(value) :: number)
 	elseif act == "mute" and s then
-		local v = shown_volume(state)
+		local v = s.volume
 		if v > 0 then
 			state.unmute_to = v
 			set_volume(state, 0)
@@ -1103,8 +1169,9 @@ local function do_action(state: State, act: string, value: string?)
 		-- The artist or album clicked in Now Playing (its name comes with the page).
 		push(state, new_view("…", "/open?uri=" .. common.encode(value), false))
 		reveal(state)
-	elseif act == "seek" and value and tonumber(value) then
-		send(state, "POST", "/seek?ms=" .. math.floor(tonumber(value) :: number))
+	elseif act == "seek" and s and value and tonumber(value) then
+		local ms = math.floor(tonumber(value) :: number)
+		expect(state, { position_ms = ms }, "/seek?ms=" .. ms)
 	elseif act == "save" and s and s.track then
 		local uri = (s.track :: common.Track).uri
 		if state.saved_uri == uri and state.saved ~= nil then
@@ -1128,7 +1195,7 @@ local function do_action(state: State, act: string, value: string?)
 		toggle_lyrics(state)
 		reveal(state)
 	elseif act == "transfer" then
-		send(state, "POST", "/transfer")
+		expect(state, { active = true }, "/transfer")
 	elseif act == "login" then
 		send(state, "POST", "/login")
 	elseif act == "cancel" then
@@ -1186,11 +1253,11 @@ local function do_action(state: State, act: string, value: string?)
 end
 
 local function seek(state: State, delta: number)
-	local s = state.status
+	local s = shown(state)
 	if s and s.track then
 		local dur = (s.track :: common.Track).duration_ms
 		local to = math.clamp(s.position_ms + delta, 0, math.max(0, dur - 1000))
-		send(state, "POST", "/seek?ms=" .. math.floor(to))
+		do_action(state, "seek", tostring(math.floor(to)))
 	end
 end
 
@@ -1223,8 +1290,7 @@ local block: BlockDef<State> = {
 			views = {},
 			library_loaded = false,
 			flash = nil,
-			volume_pending = nil,
-			volume_pending_at = 0,
+			pending = {},
 			unmute_to = nil,
 			help = false,
 			covers = {},
@@ -1242,7 +1308,7 @@ local block: BlockDef<State> = {
 	end,
 
 	title = function(state)
-		local s = state.status
+		local s = shown(state)
 		if s and s.track and s.phase == "ready" then
 			return (if s.playing then "▶ " else "⏸ ") .. common.clip(common.describe(s.track :: common.Track), 60)
 		end
@@ -1254,7 +1320,7 @@ local block: BlockDef<State> = {
 		if setup then
 			return { main = ui.col({ setup }) }
 		end
-		local s = state.status
+		local s = shown(state)
 		if s == nil then
 			return { main = ui.col({ ui.progress(nil, "Looking for the player…") }) }
 		end
@@ -1289,7 +1355,7 @@ local block: BlockDef<State> = {
 		local view = top(state)
 		local n = if view == nil then 0 elseif view.lyrics then #view.lines else #view.items
 		if key.name == "space" then
-			do_action(state, "toggle")
+			do_action(state, "play_pause")
 		elseif k == "n" then
 			do_action(state, "next")
 		elseif k == "p" then

@@ -180,6 +180,8 @@ struct Inner {
     connect_config: ConnectConfig,
     cache: Cache,
     player: Arc<Player>,
+    /// Pauses the audio output ahead of the player (see output.rs).
+    output: crate::output::Control,
     mixer: Arc<dyn Mixer>,
     session: Mutex<Session>,
     spirc: Mutex<Option<Arc<Spirc>>>,
@@ -284,6 +286,8 @@ impl Engine {
             .map_err(|e| format!("cannot open the mixer: {e}"))?;
         let backend = audio_backend::find(None).ok_or("librespot has no audio backend")?;
         let session = Session::new(session_config.clone(), Some(cache.clone()));
+        let output = crate::output::Control::default();
+        let control = output.clone();
         let player = Player::new(
             // What the desktop client plays a Premium account at: "Very high"
             // quality (320 kbit/s; Spotify's lossless files need keys librespot
@@ -304,7 +308,7 @@ impl Engine {
             // Our own output (see output.rs): float samples to the device at its
             // own rate, resampled properly when that isn't 44.1 kHz. librespot's
             // rodio backend (in float) when the device can't be opened that way.
-            move || match crate::output::Output::open() {
+            move || match crate::output::Output::open(control) {
                 Ok(output) => Box::new(output),
                 Err(e) => {
                     log::warn!("audio output: {e}; using librespot's rodio output");
@@ -321,6 +325,7 @@ impl Engine {
             connect_config,
             cache,
             player,
+            output,
             mixer,
             session: Mutex::new(session),
             spirc: Mutex::new(None),
@@ -391,6 +396,15 @@ impl Engine {
 
     fn active(&self) -> bool {
         lock(&self.0.live).active
+    }
+
+    /// Silences the output now when this device plays: the player's own
+    /// pause is heard only after the queued half second plays out.
+    fn hold_if_playing(&self) {
+        let live = lock(&self.0.live);
+        if live.active && live.playing {
+            self.0.output.hold();
+        }
     }
 
     /// Starts the OAuth sign-in: opens Spotify's page in the browser and waits
@@ -479,7 +493,11 @@ impl Engine {
     /// Plays or pauses here; when another device plays, takes its playback over.
     pub fn toggle(&self) -> Result<(), String> {
         let spirc = self.spirc()?;
-        if self.active() { spirc.play_pause() } else { spirc.transfer(None) }.map_err(|e| e.to_string())
+        if !self.active() {
+            return spirc.transfer(None).map_err(|e| e.to_string());
+        }
+        self.hold_if_playing();
+        spirc.play_pause().map_err(|e| e.to_string())
     }
 
     pub fn play(&self) -> Result<(), String> {
@@ -488,15 +506,21 @@ impl Engine {
     }
 
     pub fn pause(&self) -> Result<(), String> {
-        self.spirc()?.pause().map_err(|e| e.to_string())
+        let spirc = self.spirc()?;
+        self.hold_if_playing();
+        spirc.pause().map_err(|e| e.to_string())
     }
 
     pub fn next(&self) -> Result<(), String> {
-        self.spirc()?.next().map_err(|e| e.to_string())
+        let spirc = self.spirc()?;
+        self.0.output.discard_held();
+        spirc.next().map_err(|e| e.to_string())
     }
 
     pub fn prev(&self) -> Result<(), String> {
-        self.spirc()?.prev().map_err(|e| e.to_string())
+        let spirc = self.spirc()?;
+        self.0.output.discard_held();
+        spirc.prev().map_err(|e| e.to_string())
     }
 
     /// Takes the user's playback over from the device playing it now.
@@ -505,7 +529,9 @@ impl Engine {
     }
 
     pub fn seek(&self, ms: u32) -> Result<(), String> {
-        self.spirc()?.set_position_ms(ms).map_err(|e| e.to_string())
+        let spirc = self.spirc()?;
+        self.0.output.discard_held();
+        spirc.set_position_ms(ms).map_err(|e| e.to_string())
     }
 
     /// Sets the volume (0–100). The Connect device applies it only while
@@ -546,6 +572,7 @@ impl Engine {
             return Err(format!("not a Spotify URI: {uri:?}"));
         }
         let spirc = self.spirc()?;
+        self.0.output.discard_held();
         // Commands other than activate are ignored until this device is active.
         if !self.active() {
             spirc.activate().map_err(|e| e.to_string())?;

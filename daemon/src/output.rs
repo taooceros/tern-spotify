@@ -8,6 +8,10 @@
 //! already at 44.1 kHz gets the samples untouched, and any other rate gets
 //! them through rubato's FFT resampler (band-limited, the way the desktop
 //! app resamples). Samples stay `f32` to the device.
+//!
+//! About half a second is queued ahead of the device. A pause from this
+//! daemon (`Control::hold`) silences the device at once and keeps that half
+//! second for the resume; any other pause lets it play out first.
 
 use std::{
     collections::VecDeque,
@@ -31,16 +35,72 @@ const CHUNK_FRAMES: usize = 1024;
 const QUEUE_SECS: f32 = 0.5;
 /// How long `stop` lets the queue play out before pausing the stream.
 const DRAIN_MAX: Duration = Duration::from_secs(1);
+/// How long a pause asked for ahead of the player (`Control::hold`) keeps the
+/// device silent waiting for the player to pause; when it doesn't (librespot
+/// dropped the command), playback goes on.
+const HOLD_MAX: Duration = Duration::from_millis(1500);
 
-/// Interleaved device-rate samples the stream callback takes from.
-struct Queue {
-    samples: Mutex<VecDeque<f32>>,
-    room: Condvar,
-    max: usize,
+/// A pause asked for ahead of the player.
+#[derive(Clone, Copy)]
+enum Hold {
+    /// Asked for then; the player hasn't paused yet.
+    Asked(Instant),
+    /// The player paused: what is queued waits for the resume.
+    Paused,
 }
 
-fn lock(m: &Mutex<VecDeque<f32>>) -> std::sync::MutexGuard<'_, VecDeque<f32>> {
+struct Buf {
+    /// Interleaved device-rate samples the stream callback takes from.
+    samples: VecDeque<f32>,
+    /// Samples queued at most, set when the device opens.
+    max: usize,
+    held: Option<Hold>,
+}
+
+struct Queue {
+    buf: Mutex<Buf>,
+    room: Condvar,
+}
+
+fn lock(m: &Mutex<Buf>) -> std::sync::MutexGuard<'_, Buf> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The engine's hand on the output, ahead of the player: librespot pauses
+/// only after `Sink::stop` returns, which first plays out what is queued.
+#[derive(Clone)]
+pub struct Control(Arc<Queue>);
+
+impl Default for Control {
+    fn default() -> Control {
+        Control(Arc::new(Queue {
+            buf: Mutex::new(Buf { samples: VecDeque::new(), max: 0, held: None }),
+            room: Condvar::new(),
+        }))
+    }
+}
+
+impl Control {
+    /// Silences the device now, keeping what is queued for the resume; the
+    /// player's pause follows.
+    pub fn hold(&self) {
+        let mut b = lock(&self.0.buf);
+        if b.held.is_none() {
+            b.held = Some(Hold::Asked(Instant::now()));
+        }
+        drop(b);
+        // A `write` waiting for room goes on, so the player gets to the pause.
+        self.0.room.notify_all();
+    }
+
+    /// Drops what a pause from here kept: a seek, skip or load while paused
+    /// resumes somewhere else.
+    pub fn discard_held(&self) {
+        let mut b = lock(&self.0.buf);
+        if b.held.is_some() {
+            b.samples.clear();
+        }
+    }
 }
 
 pub struct Output {
@@ -57,7 +117,7 @@ pub struct Output {
 
 impl Output {
     /// Opens the default output device at its current rate, in `f32`.
-    pub fn open() -> Result<Output, String> {
+    pub fn open(control: Control) -> Result<Output, String> {
         let device = cpal::default_host().default_output_device().ok_or("no audio output device")?;
         let name = device.name().unwrap_or_else(|_| "unknown".to_owned());
         let config = device.default_output_config().map_err(|e| format!("{name}: {e}"))?;
@@ -66,24 +126,29 @@ impl Output {
         }
         let rate = config.sample_rate().0;
         let channels = config.channels() as usize;
-        let queue = Arc::new(Queue {
-            samples: Mutex::new(VecDeque::new()),
-            room: Condvar::new(),
-            max: (rate as f32 * QUEUE_SECS) as usize * channels,
-        });
+        let queue = control.0;
+        lock(&queue.buf).max = (rate as f32 * QUEUE_SECS) as usize * channels;
         let feed = queue.clone();
         let stream = device
             .build_output_stream(
                 &config.config(),
                 move |data: &mut [f32], _| {
-                    let mut q = lock(&feed.samples);
-                    let n = data.len().min(q.len());
-                    for (out, s) in data.iter_mut().zip(q.drain(..n)) {
+                    let mut b = lock(&feed.buf);
+                    match b.held {
+                        Some(Hold::Asked(at)) if at.elapsed() >= HOLD_MAX => b.held = None,
+                        Some(_) => {
+                            data.fill(0.0);
+                            return;
+                        }
+                        None => {}
+                    }
+                    let n = data.len().min(b.samples.len());
+                    for (out, s) in data.iter_mut().zip(b.samples.drain(..n)) {
                         *out = s;
                     }
                     // An underrun plays silence rather than old samples.
                     data[n..].fill(0.0);
-                    drop(q);
+                    drop(b);
                     feed.room.notify_one();
                 },
                 |e| log::warn!("audio output: {e}"),
@@ -118,12 +183,13 @@ impl Output {
 }
 
 /// Queues stereo frames for a `channels`-channel device, waiting while the
-/// queue is full.
+/// queue is full (but not while held: the player must get to its pause).
 fn push(queue: &Queue, channels: usize, frames: impl ExactSizeIterator<Item = (f32, f32)>) {
-    let mut q = lock(&queue.samples);
-    while q.len() > queue.max {
-        q = queue.room.wait(q).unwrap_or_else(|p| p.into_inner());
+    let mut b = lock(&queue.buf);
+    while b.samples.len() > b.max && b.held.is_none() {
+        b = queue.room.wait(b).unwrap_or_else(|p| p.into_inner());
     }
+    let q = &mut b.samples;
     q.reserve(frames.len() * channels);
     for (l, r) in frames {
         match channels {
@@ -141,18 +207,24 @@ fn push(queue: &Queue, channels: usize, frames: impl ExactSizeIterator<Item = (f
 
 impl Sink for Output {
     fn start(&mut self) -> SinkResult<()> {
+        lock(&self.queue.buf).held = None;
         self.stream.play().map_err(|e| SinkError::StateChange(e.to_string()))
     }
 
     fn stop(&mut self) -> SinkResult<()> {
-        // Let what is queued play out (the end of a track, the moment before a
-        // pause), then stop the device.
+        let mut b = lock(&self.queue.buf);
+        // Let what is queued play out (the end of the last track, a pause from
+        // another device), unless paused from here (`Control::hold`, even
+        // while this waits): then the device is already silent and what is
+        // queued waits for the resume.
         let deadline = Instant::now() + DRAIN_MAX;
-        let mut q = lock(&self.queue.samples);
-        while !q.is_empty() && Instant::now() < deadline {
-            q = self.queue.room.wait_timeout(q, Duration::from_millis(20)).unwrap_or_else(|p| p.into_inner()).0;
+        while b.held.is_none() && !b.samples.is_empty() && Instant::now() < deadline {
+            b = self.queue.room.wait_timeout(b, Duration::from_millis(20)).unwrap_or_else(|p| p.into_inner()).0;
         }
-        drop(q);
+        if b.held.is_some() {
+            b.held = Some(Hold::Paused);
+        }
+        drop(b);
         self.stream.pause().map_err(|e| SinkError::StateChange(e.to_string()))
     }
 

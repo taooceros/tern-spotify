@@ -303,9 +303,16 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         while not ctl(f"tree {hit}")["nodes"]:
             assert time.monotonic() < deadline, ("no seek target", hit, texts(f"{DOCK} .sp-seek"))
             time.sleep(0.2)
+        # The click targets cover exactly the bar drawn under them: a click lands
+        # on the share of the track it shows (the time beside it once took a
+        # fifth of their row, and clicks seeked short by up to that much).
+        bar = ctl(f"dump {DOCK} .sp-seek .sf-progress .track")["elements"][0]["rect"]
+        hits = ctl(f"dump {DOCK} .sp-seek-hits")["elements"][0]["rect"]
+        assert abs(bar[0] - hits[0]) <= 1 and abs(bar[2] - hits[2]) <= 1, ("seek targets don't cover the bar", bar, hits)
         ctl(f"click {hit}")
         status = wait_status(lambda s: abs(s["position_ms"] - dur / 2) < 4000, "clicking mid-bar seeks to the middle")
-        print(f"PASS: clicking the seek bar's middle seeks to {status['position_ms'] / 1000:.0f} s of {dur / 1000:.0f} s")
+        print(f"PASS: the seek targets cover the bar ({bar[2]:.0f} px); clicking its middle seeks to"
+              f" {status['position_ms'] / 1000:.0f} s of {dur / 1000:.0f} s")
 
         # Lyrics: 海闊天空's are unsynced, 晴天's line-synced (Musixmatch). The
         # page opens on the first and follows playback to the second.
@@ -385,6 +392,16 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         keys("Space")
         wait_status(lambda s: not s["playing"], "Space pauses")
         print("PASS: Space pauses")
+
+        # The ▶ button's click reaches the block (an action named "toggle" never
+        # did) and shows its effect before the daemon reports it.
+        ctl(f"click {DOCK} .sp-play")
+        wait_text(f"{DOCK} .sp-play", "⏸", timeout=0.5)
+        wait_status(lambda s: s["playing"], "clicking ▶ plays")
+        ctl(f"click {DOCK} .sp-play")
+        wait_text(f"{DOCK} .sp-play", "▶", timeout=0.5)
+        wait_status(lambda s: not s["playing"], "clicking ⏸ pauses")
+        print("PASS: clicking ▶/⏸ plays and pauses, the button flipping at once")
 
         volume = f"{DOCK} .sp-volume"
         before = api("/status")["volume"]

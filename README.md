@@ -52,6 +52,11 @@ that runs the same `cargo build`.
   highlighted and centred, and clicking a line seeks to it. When Spotify
   has only unsynced lyrics, the page shows them and says so. The lyrics
   page follows the song as playback moves on.
+- Play/pause, shuffle, repeat, volume, seeking and **Play here** show their
+  effect at once, without waiting for the daemon. The daemon's status takes
+  over once it reports the same thing. A command the daemon refuses goes
+  back at once (the dock says why). One that librespot drops, as it does
+  while Tern isn't the active device, goes back after 3 s.
 - The keyboard's media keys, AirPods, Control Center and the lock screen
   show and control what plays, as they do the desktop app.
 - Playback is at 320 kbit/s Ogg Vorbis (Premium's "Very high"), the best
@@ -65,7 +70,11 @@ that runs the same `cargo build`.
   linear interpolation and rounds to 16 bits. Played songs are cached (up
   to 2 GB), so a replay starts at once. The volume slider is a log curve
   over 30 dB (50% ≈ −15 dB). librespot's default 60 dB curve puts 50% at
-  −30 dB, far quieter than the desktop app.
+  −30 dB, far quieter than the desktop app. About half a second of audio
+  waits ahead of the device. A pause from Tern (the block, the palette,
+  media keys) silences it at once and keeps that half second for the
+  resume. librespot pauses only after that half second has played out, and
+  a pause from another device still does.
 - Tern is a real Spotify Connect device. Phones and the desktop app can send
   playback to it, and **Play here** (`t`) takes over playback from whatever
   device is playing now.

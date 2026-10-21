@@ -395,9 +395,30 @@
 }
 
 /* The seek bar: the progress bar under a row of invisible click targets,
-   one per 1/60 of the track. */
+   one per 1/60 of the track, then the time. The targets cover exactly the
+   bar's box, so a click seeks to where it lands on the bar. */
 [data-surface='plugin.spotify.player'] .sp-seek {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+[data-surface='plugin.spotify.player'] .sp-seek-bar {
 	position: relative;
+	flex: 1;
+	min-width: 0;
+}
+
+/* The bar's own (empty) label would take room from the track. */
+[data-surface='plugin.spotify.player'] .sp-seek-bar .sf-progress .lbl {
+	display: none;
+}
+
+[data-surface='plugin.spotify.player'] .sp-seek-time {
+	flex: none;
+	color: var(--t3);
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
 }
 
 [data-surface='plugin.spotify.player'] .sp-seek-hits {
