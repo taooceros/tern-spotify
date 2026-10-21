@@ -978,12 +978,28 @@ local function list_view(state: State, view: View, s: Status, cx: BlockCx): Node
 	p.max = { lines = math.max(4, cx.rows - 16 - (if hero then HERO_LINES else 0)) }
 	list.p = p
 
-	-- Library › New Music Friday: where ⌫ goes back to.
-	local trail: { string } = {}
+	-- Library › New Music Friday: where ⌫ goes back to. Each earlier page
+	-- in it goes back there when clicked.
+	local trail: { Node } = {}
 	for i, v in state.views do
-		trail[i] = common.clip(v.title, if i == #state.views then 60 else 24)
+		local text = common.clip(v.title, if i == #state.views then 60 else 24)
+		if i > 1 then
+			table.insert(trail, ui.el("span", { class = "sp-crumb-sep", text = "  ›  " }))
+		end
+		if i == #state.views then
+			table.insert(trail, ui.el("span", { key = "c" .. i, class = "sp-crumb sp-crumb-here", text = text }))
+		else
+			table.insert(trail, ui.el("span", {
+				key = "c" .. i,
+				class = "sp-crumb sp-link",
+				text = text,
+				title = "Back to " .. v.title,
+				attrs = { role = "link" },
+				actions = { click = "crumb=" .. i },
+			}))
+		end
 	end
-	local head: { Node } = { ui.el("span", { class = "sp-list-title", text = table.concat(trail, "  ›  ") }) }
+	local head: { Node } = { ui.el("span", { key = "trail", class = "sp-list-title" }, trail) }
 	if #state.views > 1 then
 		table.insert(head, chip("Back ⌫", "back", "neutral"))
 	end
@@ -1126,6 +1142,16 @@ local function do_action(state: State, act: string, value: string?)
 		load_library(state)
 	elseif act == "back" then
 		back(state)
+	elseif act == "crumb" and value and tonumber(value) then
+		-- A page in the title line: back to it, as ⌫ that many times.
+		local to = math.max(1, tonumber(value) :: number)
+		if to < #state.views then
+			while #state.views > to do
+				table.remove(state.views)
+			end
+			queue_images(state)
+			reveal(state)
+		end
 	elseif act == "play_all" then
 		play_all(state)
 	elseif act == "play_page" then

@@ -163,6 +163,13 @@
 	white-space: nowrap;
 }
 
+/* Earlier pages in the title line link back (`.sp-link` underlines them
+   on hover); the page shown stays dark. */
+[data-surface='plugin.spotify.player'] .sp-crumb.sp-link,
+[data-surface='plugin.spotify.player'] .sp-crumb-sep {
+	color: var(--t3);
+}
+
 /* An opened page's header: its cover, then kind, name, detail and ▶. */
 [data-surface='plugin.spotify.player'] .sp-hero {
 	display: flex;

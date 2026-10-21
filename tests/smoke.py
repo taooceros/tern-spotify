@@ -349,9 +349,18 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         ctl(f"click {MAIN} .sp-hero-play")
         wait_status(lambda s: s["playing"] and s["track"] and s["track"]["name"].startswith(first),
                     f"the album header's ▶ plays it from {first!r}")
-        keys("Backspace")
+        crumbs = texts(f"{TRAIL} .sp-crumb")
+        ctl(f"click {TRAIL} .sp-crumb.sp-link:nth-last-child(3)")
+        wait_text(TRAIL, crumbs[-2])
+        assert not any(crumbs[-1] in t for t in texts(TRAIL)), ("the crumb didn't go back", texts(TRAIL))
+        ctl(f"click {TRAIL} .sp-crumb.sp-link:first-child")
+        deadline = time.monotonic() + 5
+        while texts(TRAIL) != ["Your Library"]:
+            assert time.monotonic() < deadline, ("the first crumb doesn't go back to Your Library", texts(TRAIL))
+            time.sleep(0.1)
         print(f"PASS: clicking the artist ({track['artists'][0]!r}) and album ({track['album']!r}) in Now Playing"
-              f" opens them; the album page has its header and numbered rows, and its ▶ plays it from {first!r}")
+              f" opens them; the album page has its header and numbered rows, and its ▶ plays it from {first!r};"
+              f" clicking {crumbs[-2]!r} in the title line goes back there, and 'Your Library' all the way back")
         track = api("/status")["track"]
 
         uri = track["uri"]

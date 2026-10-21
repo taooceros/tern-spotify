@@ -41,7 +41,8 @@ that runs the same `cargo build`.
   numbered instead of repeating its cover. ⏎ or a double-click on a song
   plays it inside that list, so what follows it there plays next; a click
   only chooses the row. ⌫ goes back. The title line shows where you are
-  (`Your Library › Liked Songs`), and the song playing now is marked ♪.
+  (`Your Library › Liked Songs`); click a page in it to go back there. The
+  song playing now is marked ♪.
 - Covers load from Spotify's CDN a few at a time: the playing song's first,
   then the page's, then its rows' from the chosen one on, so a long
   playlist fills in where you look. Rows use Spotify's 64 px thumbnails.
