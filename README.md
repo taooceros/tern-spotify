@@ -35,7 +35,10 @@ flowchart LR
 ```
 
 The daemon runs separately from Tern, so music keeps playing when the block
-closes or the plugin reloads. **Spotify: Quit Player** stops it.
+closes or the plugin reloads. **Spotify: Quit Player** stops it. When the
+connection to Spotify drops, the daemon reconnects within a second and
+picks playback back up at the same song and position. It doesn't wait for
+the next song to fail on the dead connection.
 
 ## Install
 

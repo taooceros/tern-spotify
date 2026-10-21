@@ -21,7 +21,7 @@ use librespot_connect::{
 };
 use librespot_core::{
     Session, SessionConfig, SpotifyUri, authentication::Credentials, cache::Cache, config::DeviceType,
-    error::ErrorKind,
+    dealer::protocol::TransferOptions, error::ErrorKind, spclient::TransferRequest,
 };
 use librespot_metadata::{
     Metadata, Track,
@@ -75,6 +75,16 @@ const SIGNED_IN_PAGE: &str = "Signed in to Spotify. You can close this tab and g
 
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// How often the supervisor checks the session's connection to Spotify's
+/// server (AP). librespot's Connect loop notices a closed one only when
+/// some other event wakes it, which can take minutes; meanwhile the next
+/// song's decryption key is asked for on the dead connection, times out
+/// after 1.5 s, and the song is skipped. Checking well within that keeps
+/// key requests on a live connection.
+const SESSION_CHECK: Duration = Duration::from_millis(250);
+/// Playback cut off by a lost connection resumes only when reconnecting
+/// takes less than this; later, the user may have moved on.
+const RESUME_WITHIN: Duration = Duration::from_secs(60);
 /// Room for played audio files in the cache dir (oldest go first).
 const AUDIO_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// The volume slider's range: 0% to 100% spans this many dB (log curve).
@@ -731,6 +741,9 @@ impl Inner {
     async fn supervise(self: Arc<Self>) {
         let mut first = true;
         let mut backoff = FIRST_BACKOFF;
+        // When a lost connection cut off playback here: take it back once
+        // connected again.
+        let mut resume: Option<Instant> = None;
         loop {
             if self.quitting.load(Ordering::SeqCst) {
                 return;
@@ -774,7 +787,23 @@ impl Inner {
             match spirc {
                 Ok((spirc, task)) => {
                     backoff = FIRST_BACKOFF;
-                    *lock(&self.spirc) = Some(Arc::new(spirc));
+                    if resume.take().is_some_and(|at| at.elapsed() < RESUME_WITHIN) {
+                        // This device's last state on Spotify's side (what the
+                        // old device reported as it shut down): same queue, song
+                        // and position. Playing: the old device paused as it went.
+                        log::info!("resuming playback where the lost connection left it");
+                        let request = TransferRequest {
+                            transfer_options: TransferOptions {
+                                restore_paused: Some("resume".to_owned()),
+                                ..TransferOptions::default()
+                            },
+                        };
+                        if let Err(e) = spirc.transfer(Some(request)) {
+                            log::warn!("cannot resume playback: {e}");
+                        }
+                    }
+                    let spirc = Arc::new(spirc);
+                    *lock(&self.spirc) = Some(spirc.clone());
                     {
                         let mut live = lock(&self.live);
                         live.phase = Phase::Ready;
@@ -803,7 +832,29 @@ impl Inner {
                         });
                     }
                     log::info!("signed in as {}", session.username());
-                    task.await;
+                    let mut task = std::pin::pin!(task);
+                    let mut playing = false;
+                    // Whether the session's connection closed (rather than the
+                    // device ending on its own).
+                    let lost = loop {
+                        tokio::select! {
+                            _ = &mut task => break session.is_invalid(),
+                            _ = tokio::time::sleep(SESSION_CHECK) => {
+                                if session.is_invalid() {
+                                    break true;
+                                }
+                                // As of the last check before the connection closed:
+                                // the device's end shows in `live` too.
+                                let live = lock(&self.live);
+                                playing = live.active && (live.playing || live.loading);
+                            }
+                        }
+                    };
+                    // A lost connection's device is dropped, not shut down: its
+                    // shutdown would tell Spotify it went inactive, which wipes
+                    // its queue there (`became_inactive` resets the state first).
+                    // Unpolled, the task does nothing more; Spotify keeps the last
+                    // state it was sent, and the next device takes it back.
                     lock(&self.spirc).take();
                     session.shutdown();
                     if self.quitting.load(Ordering::SeqCst) {
@@ -813,12 +864,20 @@ impl Inner {
                         log::info!("signed out");
                         continue;
                     }
-                    log::warn!("the Spotify Connect device ended; reconnecting");
                     self.set_phase(
                         Phase::Connecting,
                         Some("Lost the connection to Spotify; reconnecting".to_owned()),
                     );
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if lost {
+                        log::warn!(
+                            "the connection to Spotify closed; reconnecting now{}",
+                            if playing { " and resuming playback" } else { "" }
+                        );
+                        resume = playing.then(Instant::now);
+                    } else {
+                        log::warn!("the Spotify Connect device ended; reconnecting");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
                 }
                 Err(e) => {
                     session.shutdown();
