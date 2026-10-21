@@ -3,6 +3,10 @@
 A Spotify player for [Tern](https://tern.sh). A Rust daemon built on
 [librespot](https://github.com/librespot-org/librespot) plays the audio. It
 shows up as a Spotify Connect device named **Tern**. The Luau plugin is the
+
+| Library and player bar | Album | Synced lyrics |
+| --- | --- | --- |
+| ![The player block in Tern: your library over the player bar](docs/player.png) | ![An album page](docs/album.png) | ![Lyrics following the song](docs/lyrics.png) |
 front end. Spotify Premium is required.
 
 ```mermaid
