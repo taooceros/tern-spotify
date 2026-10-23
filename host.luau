@@ -1,14 +1,16 @@
 --!strict
 -- The `player` block (kind `spotify.player`): the front end of the Rust
--- daemon in `daemon/` (librespot). It polls the daemon's `/status` once a
--- second and draws what is playing, the controls, and a list (Liked Songs
--- and playlists, or search results) to play from. It starts the daemon when
--- nothing answers, and offers to build it when it isn't built yet.
+-- daemon in `daemon/`, which runs Spotify's Soloist to play the audio. It
+-- polls the daemon's `/status` once a second and draws what is playing, the
+-- controls, and a list (Liked Songs and playlists, or search results) to
+-- play from. It starts the daemon when nothing answers, and offers to build
+-- it when it isn't built yet.
 --
 -- Keys: Space play/pause (takes playback over from another device when this
 -- one isn't active), n/p next/previous, ←/→ seek 10 s, +/- volume, s
 -- shuffle, r repeat (off → all → one), / search, l library, ↑↓/jk choose,
--- Enter play the chosen row, t play here (transfer).
+-- Enter play the chosen row, q add it to the queue, u up next, t play here
+-- (transfer).
 
 local common = require("./common")
 
@@ -569,6 +571,46 @@ local function toggle_lyrics(state: State)
 	push(state, lyrics)
 end
 
+local UP_NEXT = "/queue"
+
+-- What plays next (the queue, then the rest of the context), on top of the
+-- browser; `u` again (or ⌫) closes it.
+local function toggle_up_next(state: State)
+	local view = top(state)
+	if view and view.path == UP_NEXT then
+		table.remove(state.views)
+		return
+	end
+	push(state, new_view("Up next", UP_NEXT, false))
+end
+
+-- `q`: the chosen song goes in the queue, after the playing one.
+local function enqueue(state: State)
+	local view = top(state)
+	local item = if view and not view.lyrics then view.items[view.sel] else nil
+	if item == nil or item.kind ~= "track" then
+		state.flash = "Choose a song to add to the queue."
+		return
+	end
+	local chosen = item :: Item
+	common.call("POST", "/queue?uri=" .. common.encode(chosen.uri), nil, function(reply: Reply, _)
+		if not state.alive then
+			return
+		end
+		if reply.ok then
+			state.flash = nil
+			state.cx:toast("success", "Added to the queue", chosen.name)
+			local open = top(state)
+			if open and open.path == UP_NEXT then
+				fill(state, open)
+			end
+		else
+			state.flash = reply.error
+		end
+		render(state)
+	end)
+end
+
 -- The line sung at `ms`: the last one starting at or before it.
 local function lyric_at(view: View, ms: number): number
 	local at = 1
@@ -617,6 +659,13 @@ after_status = function(state: State, s: Status)
 				view.sel = at
 				reveal(state)
 			end
+		end
+	elseif view and view.path == UP_NEXT and view.track_uri ~= track.uri then
+		-- An open Up next page moves on with the song.
+		local first = view.track_uri == nil
+		view.track_uri = track.uri
+		if not first then
+			fill(state, view)
 		end
 	end
 end
@@ -704,11 +753,11 @@ local function setup_view(state: State): Node?
 	elseif reach == "building" then
 		return card("Building the player", "info", {
 			ui.text({ ui.span("cargo build --release in ", "muted"), ui.span(common.DAEMON_DIR, "mono") }),
-			ui.progress(nil, "Compiling librespot… the first build takes a few minutes"),
+			ui.progress(nil, "Compiling the daemon… the first build takes a few minutes"),
 		})
 	elseif reach == "nobinary" then
 		local kids: { Node } = {
-			ui.text({ ui.span("The player is a Rust program built on librespot. It is not built yet.") }),
+			ui.text({ ui.span("The player's daemon is a Rust program. It is not built yet.") }),
 			ui.text({ ui.span("cd " .. common.DAEMON_DIR .. " && cargo build --release", "mono") }),
 			ui.row({ chip("Build it now", "build", "accent") }),
 		}
@@ -1087,9 +1136,48 @@ local function list_view(state: State, view: View, s: Status, cx: BlockCx): Node
 	return ui.el("div", { key = "browse", class = "sp-browse" }, body)
 end
 
-local KEYS = "Space play/pause · n/p next/prev · ←/→ seek · +/- volume · 1–9/0 volume 10–100% · m mute · f ♡ · y lyrics · s shuffle · r repeat · / search · l library · ⏎ open/play · a play all · ⌫ back · t play here · ? hide keys"
+local KEYS = "Space play/pause · n/p next/prev · ←/→ seek · +/- volume · 1–9/0 volume 10–100% · m mute · f ♡ · y lyrics · s shuffle · r repeat · / search · l library · ⏎ open/play · a play all · q add to queue · u up next · ⌫ back · t play here · ? hide keys"
 -- One line's worth, for narrow panes; `?` shows KEYS.
 local KEYS_SHORT = "Space ⏯ · n/p ⏭⏮ · / search · y lyrics · f ♡ · ? all keys"
+
+-- The quality asked for, as the chip that switches it names it.
+local QUALITY_LABEL: { [string]: string } = { lossless = "Lossless", very_high = "320 kbps" }
+local QUALITY_NEXT: { [string]: string } = { lossless = "very_high", very_high = "lossless" }
+local CODEC_LABEL: { [string]: string } = { flac = "FLAC", vorbis = "Ogg Vorbis", aac = "AAC", mp3 = "MP3" }
+
+-- What the playing track is decoded from, as Soloist reported it: FLAC by
+-- its sample rate (its bitrate varies), lossy formats by their bitrate.
+local function format_label(f: { codec: string, bitrate_kbps: number?, sample_rate_hz: number? }): string
+	local name = CODEC_LABEL[f.codec] or string.upper(f.codec)
+	local khz = if f.sample_rate_hz then string.format("%g kHz", f.sample_rate_hz / 1000) else nil
+	if f.codec == "flac" then
+		return if khz then name .. " " .. khz else name
+	end
+	return if f.bitrate_kbps then name .. " " .. f.bitrate_kbps .. " kbps" else name
+end
+
+-- The player (Soloist) while it can't play: what to set up, or why not.
+local function player_view(s: Status): Node?
+	local p = s.player
+	if p.state == "ready" then
+		return nil
+	elseif p.state == "setup" then
+		return card("Set up the player", "warning", {
+			ui.text({ ui.span(p.message or "Soloist is not set up.") }),
+			ui.text({ ui.span("Soloist  ", "muted"), ui.span(p.binary, "mono") }),
+			ui.text({ ui.span("API key  ", "muted"), ui.span(p.api_key_file, "mono") }),
+			ui.text({ ui.span("Search and your library work meanwhile. The README says where to get both.", "dim") }),
+			ui.row({ chip("Check again", "retry", "accent") }),
+		})
+	elseif p.state == "error" or p.state == "expired" then
+		return card(if p.state == "expired" then "The Soloist build expired" else "The player stopped", "error", {
+			ui.text({ ui.span(p.message or "Soloist stopped.") }),
+			ui.row({ chip("Try again", "retry", "accent") }),
+		})
+	end
+	local label = p.message or (if p.state == "restarting" then "Restarting the player…" else "Starting the player…")
+	return ui.progress(nil, label)
+end
 
 local function dock_view(state: State, s: Status): Node
 	local where: { Span | string } = {}
@@ -1097,6 +1185,10 @@ local function dock_view(state: State, s: Status): Node
 		table.insert(where, ui.span("● Playing on " .. s.device, "ok"))
 	else
 		table.insert(where, ui.span("○ " .. s.device .. " is not the active device", "muted"))
+	end
+	local f = s.player.format
+	if s.active and f then
+		table.insert(where, ui.span("  ·  " .. format_label(f), "dim"))
 	end
 	local who = s.display_name or s.user
 	if who then
@@ -1107,12 +1199,20 @@ local function dock_view(state: State, s: Status): Node
 	sp.grow = 1
 	summary.p = sp
 	local row: { Node } = { summary }
-	if not s.active then
+	if s.player.state == "ready" and not s.active then
 		table.insert(row, chip("Play here", "transfer", "accent"))
 	end
+	-- The quality asked for (what plays shows beside "Playing on"); a click
+	-- asks for the other, and the player restarts to take it.
+	table.insert(row, chip("Quality: " .. (QUALITY_LABEL[s.player.quality] or s.player.quality), "quality", "neutral"))
 	table.insert(row, chip("Sign out", "logout", "neutral"))
 	local lines: { Node } = { ui.row(row) }
 	local warn = state.flash or s.error
+	local days = s.player.expires_in_days
+	if warn == nil and days and days <= 14 and s.player.state == "ready" then
+		warn = "This Soloist build stops working in " .. days .. (if days == 1 then " day" else " days")
+			.. ": download the current one from Spotify's Soloist page."
+	end
 	if warn then
 		table.insert(lines, ui.text({ ui.span(warn :: string, "warning") }))
 	end
@@ -1198,6 +1298,14 @@ local function do_action(state: State, act: string, value: string?)
 		reveal(state)
 	elseif act == "transfer" then
 		expect(state, { active = true }, "/transfer")
+	elseif act == "quality" and s then
+		local level = QUALITY_NEXT[s.player.quality] or "lossless"
+		send(state, "POST", "/quality?level=" .. level)
+	elseif act == "enqueue" then
+		enqueue(state)
+	elseif act == "up_next" then
+		toggle_up_next(state)
+		reveal(state)
 	elseif act == "login" then
 		send(state, "POST", "/login")
 	elseif act == "cancel" then
@@ -1336,8 +1444,10 @@ local block: BlockDef<State> = {
 		if view then
 			table.insert(parts, list_view(state, view, s, cx))
 		end
-		-- The player bar sits at the bottom, above the device line.
-		return { main = ui.col(parts), dock = ui.col({ now_view(state, s), dock_view(state, s) }) }
+		-- The player bar sits at the bottom, above the device line; while
+		-- the player can't play, what it needs takes the bar's place.
+		local player = player_view(s)
+		return { main = ui.col(parts), dock = ui.col({ player or now_view(state, s), dock_view(state, s) }) }
 	end,
 
 	key = function(state, key, _cx)
@@ -1390,6 +1500,11 @@ local block: BlockDef<State> = {
 			return true
 		elseif k == "t" then
 			do_action(state, "transfer")
+		elseif k == "u" then
+			do_action(state, "up_next")
+			return true
+		elseif k == "q" then
+			do_action(state, "enqueue")
 		elseif k == "/" then
 			ask_search(state)
 		elseif k == "l" then

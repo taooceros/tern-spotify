@@ -213,6 +213,36 @@ tern.command({
 })
 tern.command({ id = "logout", title = "Spotify: Sign Out", icon = "play", run = command("POST", "/logout") })
 tern.command({
+	id = "quality",
+	title = "Spotify: Audio Quality…",
+	icon = "play",
+	run = function(cx: WindowCx)
+		with_daemon(cx, function(cx2: WindowCx, s: Status)
+			local levels = { "lossless", "very_high" }
+			local items: { PickItem } = {
+				{ label = "Lossless", detail = "FLAC, when Spotify has it", current = s.player.quality == "lossless", index = 1 },
+				{ label = "Very high", detail = "Ogg Vorbis, 320 kbps", current = s.player.quality == "very_high", index = 2 },
+			}
+			cx2:pick({ items = items, placeholder = "Audio quality (the player restarts to change it)", action = "choose" })
+				:next(function(choice: PickItem?, _err: string?, _cx3: WindowCx?)
+					if choice == nil then
+						return
+					end
+					local level = levels[choice.index :: number]
+					common.call("POST", "/quality?level=" .. level, nil, function(reply: Reply, cx4: WindowCx?)
+						if cx4 then
+							if reply.ok then
+								cx4:toast("success", "Spotify quality: " .. choice.label)
+							else
+								cx4:toast("error", "Spotify", reply.error)
+							end
+						end
+					end)
+				end)
+		end)
+	end,
+})
+tern.command({
 	id = "quit",
 	title = "Spotify: Quit Player",
 	icon = "play",

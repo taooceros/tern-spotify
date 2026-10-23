@@ -32,11 +32,11 @@ pub fn run_main_loop(done: &AtomicBool) {
     }
 }
 
-fn handle(engine: &Engine, event: MediaControlEvent) {
+async fn handle(engine: &Engine, event: MediaControlEvent) {
     let status = engine.status();
     let result = match event {
-        MediaControlEvent::Toggle => engine.toggle(),
-        MediaControlEvent::Play => engine.play(),
+        MediaControlEvent::Toggle => engine.toggle().await,
+        MediaControlEvent::Play => engine.play().await,
         MediaControlEvent::Pause | MediaControlEvent::Stop => engine.pause(),
         MediaControlEvent::Next => engine.next(),
         MediaControlEvent::Previous => engine.prev(),
@@ -74,7 +74,12 @@ pub fn start(engine: Engine, runtime: &tokio::runtime::Handle) {
         }
     };
     let keys = engine.clone();
-    if let Err(e) = controls.attach(move |event| handle(&keys, event)) {
+    let rt = runtime.clone();
+    // Commands wait for the player (taking playback over does): off the main thread.
+    if let Err(e) = controls.attach(move |event| {
+        let keys = keys.clone();
+        rt.spawn(async move { handle(&keys, event).await });
+    }) {
         log::warn!("no media keys: {e:?}");
     }
     runtime.spawn(publish(engine, controls));

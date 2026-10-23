@@ -1,15 +1,16 @@
-//! tern-spotify: a Spotify player for Tern, built on librespot.
+//! tern-spotify: a Spotify player for Tern.
 //!
-//! It signs in with Spotify's OAuth flow, plays audio on this machine as a
-//! Spotify Connect device and serves a small JSON API on 127.0.0.1 that the
-//! Tern plugin's Luau halves drive (see `api.rs` for the routes).
+//! It signs in with Spotify's OAuth flow (librespot), runs Spotify's official
+//! Soloist to play the audio as a Spotify Connect device on this machine,
+//! and serves a small JSON API on 127.0.0.1 that the Tern plugin's Luau
+//! halves drive (see `api.rs` for the routes).
 
 mod api;
 mod catalog;
 mod engine;
 #[cfg(target_os = "macos")]
 mod nowplaying;
-mod output;
+mod soloist;
 
 use std::{
     path::PathBuf,
@@ -22,15 +23,18 @@ use std::{
 
 use engine::{Engine, EngineConfig};
 
-const USAGE: &str = "usage: tern-spotify serve --cache DIR [--port PORT] [--name NAME]
+const USAGE: &str = "usage: tern-spotify serve --cache DIR --soloist DIR [--port PORT] [--name NAME]
 
-Serves the player's JSON API on 127.0.0.1:PORT (default 47821). DIR keeps the
-stored Spotify credentials, the device id and the volume. NAME is the Spotify
-Connect device name (default \"Tern\").";
+Serves the player's JSON API on 127.0.0.1:PORT (default 47821). --cache keeps
+the stored Spotify credentials. --soloist holds the official Soloist
+executable (`soloist`) and your Soloist API key (`api-key`), both put there
+by you, and Soloist's own data and caches. NAME is the Spotify Connect device
+name (default \"Tern\").";
 
 struct Args {
     port: u16,
     cache: PathBuf,
+    soloist: PathBuf,
     name: String,
 }
 
@@ -50,23 +54,26 @@ fn parse_args() -> Result<Args, String> {
     }
     let mut port = 47821;
     let mut cache = None;
+    let mut soloist = None;
     let mut name = "Tern".to_owned();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value\n\n{USAGE}"));
         match flag.as_str() {
             "--port" => port = value()?.parse().map_err(|e| format!("--port: {e}"))?,
             "--cache" => cache = Some(PathBuf::from(value()?)),
+            "--soloist" => soloist = Some(PathBuf::from(value()?)),
             "--name" => name = value()?,
             _ => return Err(format!("unknown argument {flag}\n\n{USAGE}")),
         }
     }
     let cache = cache.ok_or_else(|| format!("--cache is required\n\n{USAGE}"))?;
-    Ok(Args { port, cache, name })
+    let soloist = soloist.ok_or_else(|| format!("--soloist is required\n\n{USAGE}"))?;
+    Ok(Args { port, cache, soloist, name })
 }
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,librespot_audio=warn,librespot_playback=warn"),
+        env_logger::Env::default().default_filter_or("info,mdns_sd=warn"),
     )
     .format_timestamp_millis()
     .init();
@@ -111,7 +118,7 @@ fn main() -> ExitCode {
 
 async fn setup(args: Args) -> Option<(tokio::net::TcpListener, Engine, catalog::Catalog)> {
     // Bind first: a second daemon started while one runs exits here, before
-    // it touches the audio device or the stored credentials.
+    // it starts a second Soloist or touches the stored credentials.
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", args.port)).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -120,7 +127,8 @@ async fn setup(args: Args) -> Option<(tokio::net::TcpListener, Engine, catalog::
         }
     };
     let catalog = catalog::Catalog::new(args.cache.clone());
-    let engine = match Engine::start(EngineConfig { cache_dir: args.cache, device_name: args.name }) {
+    let config = EngineConfig { cache_dir: args.cache, soloist_dir: args.soloist, device_name: args.name };
+    let engine = match Engine::start(config) {
         Ok(engine) => engine,
         Err(e) => {
             log::error!("{e}");

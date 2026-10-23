@@ -1,8 +1,8 @@
 --!strict
--- What both halves share: where the Rust daemon (`daemon/`, built on
--- librespot) lives and listens, starting it, and calling its JSON API. The
--- daemon does the work (sign-in, playback, search); the Luau halves only
--- draw it and send it commands.
+-- What both halves share: where the Rust daemon (`daemon/`) lives and
+-- listens, starting it, and calling its JSON API. The daemon does the work
+-- (sign-in, search, and running Spotify's Soloist, which plays the audio);
+-- the Luau halves only draw it and send it commands.
 
 local common = {}
 
@@ -15,6 +15,9 @@ common.DAEMON_DIR = DIR .. "/daemon"
 common.BIN = common.DAEMON_DIR .. "/target/release/tern-spotify"
 common.CACHE = tern.plugin.data .. "/librespot"
 common.LOG = tern.plugin.data .. "/daemon.log"
+-- The official Soloist executable (`soloist`) and the user's API key
+-- (`api-key`) go here; the daemon keeps Soloist's data and caches beside them.
+common.SOLOIST = tern.plugin.data .. "/soloist"
 
 export type Track = {
 	uri: string,
@@ -28,6 +31,19 @@ export type Track = {
 	duration_ms: number,
 }
 
+-- What plays the audio (daemon/src/soloist/mod.rs `PlayerStatus`).
+export type Player = {
+	-- stopped | setup | starting | pairing | ready | restarting | error | expired
+	state: string,
+	message: string?,
+	binary: string,
+	api_key_file: string,
+	expires_in_days: number?,
+	quality: string, -- lossless | very_high (asked for)
+	-- What the playing track is decoded from, when Soloist said.
+	format: { codec: string, bitrate_kbps: number?, sample_rate_hz: number? }?,
+}
+
 -- The daemon's `/status` (see daemon/src/engine.rs `Status`).
 export type Status = {
 	phase: string, -- signed_out | signing_in | connecting | ready | error
@@ -36,6 +52,7 @@ export type Status = {
 	-- The account's profile name (`user` is an opaque id).
 	display_name: string?,
 	device: string,
+	player: Player,
 	active: boolean,
 	playing: boolean,
 	loading: boolean,
@@ -47,7 +64,7 @@ export type Status = {
 	version: string,
 }
 
--- One row of `/search`, `/library` or `/open` (daemon/src/catalog.rs `Item`).
+-- One row of `/search`, `/library`, `/open` or `/queue` (daemon/src/catalog.rs `Item`).
 export type Item = {
 	kind: string,
 	uri: string,
@@ -118,10 +135,11 @@ end
 -- port is taken. `cb` runs once the shell has forked it.
 function common.start(cb: ((ok: boolean, err: string?) -> ())?)
 	pcall(tern.fs.mkdir, common.CACHE)
-	local script = 'nohup "$0" serve --port "$1" --cache "$2" >>"$3" 2>&1 </dev/null &'
+	pcall(tern.fs.mkdir, common.SOLOIST)
+	local script = 'nohup "$0" serve --port "$1" --cache "$2" --soloist "$3" >>"$4" 2>&1 </dev/null &'
 	local ok, err = pcall(function()
 		tern.process.run(
-			{ "/bin/sh", "-c", script, common.BIN, tostring(common.PORT), common.CACHE, common.LOG },
+			{ "/bin/sh", "-c", script, common.BIN, tostring(common.PORT), common.CACHE, common.SOLOIST, common.LOG },
 			{ timeout_ms = 5000 },
 			function(result: ProcessResult, _)
 				if cb then

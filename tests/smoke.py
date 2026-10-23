@@ -9,14 +9,18 @@ Tern and plugins are untouched) and links this folder as a plugin. Screenshots g
     python3 tests/smoke.py --live   # signed in, with a copy of your stored sign-in
 
 The default run opens the player block, checks that it starts the Rust daemon and shows
-the sign-in card, that commands are refused while signed out, and that Quit Player and
-Start again work.
+the sign-in card, that commands are refused while signed out (and the Soloist player
+stays stopped), and that Quit Player and Start again work.
 
 `--live` copies the credential your own player stored (`tern plugin dir`'s plugin-data)
-into the isolated config, so it needs one sign-in done in your Tern and your own player
-stopped (the port is shared). It browses the library into Liked Songs and back, plays a
-song there, searches through the `/` prompt, opens an artist, plays it with `a`, and
-pauses. It plays a few seconds of audio.
+into the isolated config, and links your Soloist executable and copies your API key
+(plugin-data/spotify/soloist/), so it needs one sign-in done in your Tern, Soloist set
+up there, and your own player stopped (the port is shared). The isolated Soloist starts
+with no session of its own, so the run checks that the daemon pairs it with the
+account. It browses the library into Liked Songs and back, plays a song there, searches
+through the `/` prompt, opens an artist, plays it with `a`, queues a song, switches
+between Lossless and 320 kbps (checking the format Soloist decodes), and pauses. It
+plays a few seconds of audio.
 """
 import json
 import os
@@ -41,16 +45,18 @@ PORT = 47821
 BIN = ROOT / "daemon/target/release/tern-spotify"
 LIVE = "--live" in sys.argv[1:]
 # What `--live` copies from your own player's data: the reusable credential, the
-# Connect device id it belongs with, and the persisted-query hashes.
+# device id it belongs with, and the persisted-query hashes.
 REAL_DATA = Path.home() / "Library/Application Support/Tern/plugin-data/spotify/librespot"
 SEED = ("credentials.json", "device_id", "pathfinder.json")
+# Your Soloist executable (linked) and API key (copied); never its session.
+REAL_SOLOIST = REAL_DATA.parent / "soloist"
 # 晴天 (Jay Chou): Spotify has line-synced lyrics for it.
 SYNCED_TRACK = "spotify:track:5pIcwtJYNJx93l420oR2Vm"
 
 
 def api(path, method="GET"):
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", method=method)
-    with urllib.request.urlopen(req, timeout=5) as r:
+    with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read())
 
 
@@ -60,20 +66,25 @@ def port_open():
         return s.connect_ex(("127.0.0.1", PORT)) == 0
 
 
-def publish(out: Path):
-    """Copies a run's shots and logs into .dev/ once Tern has stopped: Tern reloads a
-    linked plugin on any change in its folder."""
+def publish(out: Path, config: Path):
+    """Copies a run's shots and logs (Tern's and the daemon's) into .dev/ once Tern has
+    stopped: Tern reloads a linked plugin on any change in its folder."""
     for name in ("shots", "smoke-logs"):
         shutil.rmtree(ARTIFACTS / name, ignore_errors=True)
         if (out / name).exists():
             shutil.copytree(out / name, ARTIFACTS / name)
     shutil.copy(out / "smoke-process.log", ARTIFACTS / "smoke-process.log")
+    daemon_log = config / "plugin-data" / "spotify" / "daemon.log"
+    if daemon_log.exists():
+        shutil.copy(daemon_log, ARTIFACTS / "smoke-daemon.log")
 
 
 assert BIN.exists(), f"build the daemon first: cargo build --release in {ROOT / 'daemon'}"
 assert not port_open(), f"something already listens on 127.0.0.1:{PORT} (a running player?); quit it first"
 if LIVE:
     assert (REAL_DATA / "credentials.json").exists(), f"--live needs a sign-in stored in {REAL_DATA}"
+    assert (REAL_SOLOIST / "soloist").exists() and (REAL_SOLOIST / "api-key").exists(), \
+        f"--live needs the Soloist executable and your API key in {REAL_SOLOIST}"
 
 with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporary:
     work = Path(temporary)
@@ -91,6 +102,11 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         for name in SEED:
             if (REAL_DATA / name).exists():
                 shutil.copy(REAL_DATA / name, seeded / name)
+        solo = seeded.parent / "soloist"
+        solo.mkdir(mode=0o700)
+        (solo / "soloist").symlink_to((REAL_SOLOIST / "soloist").resolve())
+        shutil.copy(REAL_SOLOIST / "api-key", solo / "api-key")
+        (solo / "api-key").chmod(0o600)
     zdot = work / "zsh"
     zdot.mkdir()
     (zdot / ".zshrc").write_text("PROMPT='%~ %# '\n", encoding="utf-8")
@@ -140,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
     def api_post(path, body):
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", method="POST",
                                      data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
 
     def clock(ms):
@@ -185,10 +201,11 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         ctl("shot spotify-signin")
         status = api("/status")
         assert status["phase"] == "signed_out" and status["device"] == "Tern", status
-        print("PASS: the block starts the librespot daemon and shows the sign-in card;"
-              f" /status says {status['phase']}, device {status['device']!r}")
+        assert status["player"]["state"] == "stopped", status["player"]
+        print("PASS: the block starts the daemon and shows the sign-in card;"
+              f" /status says {status['phase']}, device {status['device']!r}, player {status['player']['state']}")
 
-        for path in ("/toggle", "/next", "/search?q=x", "/library"):
+        for path in ("/toggle", "/next", "/queue", "/search?q=x", "/library"):
             method = "POST" if path in ("/toggle", "/next") else "GET"
             try:
                 api(path, method)
@@ -196,13 +213,17 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
             except urllib.error.HTTPError as e:
                 body = json.loads(e.read())
                 assert e.code == 409 and "not signed in" in body["error"], (path, e.code, body)
-        print("PASS: playback, search and the library refuse with 409 while signed out")
+        print("PASS: playback, the queue, search and the library refuse with 409 while signed out")
 
         logs = list(config.rglob("daemon.log"))
         device_ids = list(config.rglob("librespot/device_id"))
         assert logs and device_ids, (logs, device_ids)
         assert len(device_ids[0].read_text().strip()) == 40
-        print(f"PASS: the daemon keeps its log and device id in the plugin data dir ({logs[0].parent})")
+        soloist = device_ids[0].parent.parent / "soloist"
+        assert soloist.is_dir() and soloist.stat().st_mode & 0o077 == 0, oct(soloist.stat().st_mode)
+        assert not (soloist / "data").exists(), list(soloist.iterdir())
+        print(f"PASS: the daemon keeps its log and device id in the plugin data dir ({logs[0].parent});"
+              " Soloist's dir is private and holds no session while signed out")
 
         ctl("plugins run plugin.spotify.quit")
         deadline = time.monotonic() + 10
@@ -233,6 +254,16 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         print(f"PASS: signed in with the stored credential; the block shows Your Library with Liked Songs,"
               f" {thumbs} rows with their covers")
 
+        # The isolated Soloist has no session: the daemon pairs it with the account.
+        status = wait_status(lambda s: s["player"]["state"] == "ready", "Soloist signs in", timeout=60)
+        log = next(config.rglob("daemon.log")).read_text()
+        assert "Soloist took the pairing" in log, "the isolated Soloist signed in without being paired"
+        key = (REAL_SOLOIST / "api-key").read_text().strip()
+        assert key not in log, "the API key is in the daemon's log"
+        assert key not in json.dumps(status), "the API key is in /status"
+        print(f"PASS: the daemon starts Soloist and pairs it with the signed-in account (no Spotify app);"
+              f" the build expires in {status['player']['expires_in_days']} days; the key is in neither the log nor /status")
+
         select("Liked Songs")
         keys("Enter")
         wait_text(TRAIL, "Your Library › Liked Songs")
@@ -257,6 +288,10 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         ctl("shot spotify-liked-playing")
         print(f"PASS: ⏎ opens Liked Songs (its header shows the cover, name and song count); ⏎ on a song"
               f" plays it there ({status['track']['name']!r}), and its row shows ♪")
+        assert status["active"], status
+        status = wait_status(lambda s: s["player"]["format"], "Soloist names the format it plays")
+        wait_text(DOCK, "Playing on Tern")
+        print(f"PASS: Soloist is the active device and plays from {status['player']['format']}")
 
         rows = f"{MAIN} [data-role='sp-rows'] .sp-row"
         row = texts(f"{rows}:nth-child(4) .sp-row-name")[0].rstrip("…")
@@ -297,10 +332,14 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         ctl("shot spotify-artist")
         print(f"PASS: ⏎ opens the artist; a plays it ({status['track']['name']!r} by {status['track']['artists']})")
 
-        dur = status["track"]["duration_ms"]
-        hit = f"{DOCK} .sp-seek-hit[title='Seek to {clock((29.5 / 60) * dur)}']"
+        # Soloist names a rounded duration first and the file's own once it
+        # opens it: aim at whatever the bar shows now.
         deadline = time.monotonic() + 10
-        while not ctl(f"tree {hit}")["nodes"]:
+        while True:
+            dur = api("/status")["track"]["duration_ms"]
+            hit = f"{DOCK} .sp-seek-hit[title='Seek to {clock((29.5 / 60) * dur)}']"
+            if ctl(f"tree {hit}")["nodes"]:
+                break
             assert time.monotonic() < deadline, ("no seek target", hit, texts(f"{DOCK} .sp-seek"))
             time.sleep(0.2)
         # The click targets cover exactly the bar drawn under them: a click lands
@@ -389,7 +428,66 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
                 api(f"/save?uri={uri}&on={str(was).lower()}", "POST")
         print(f"PASS: f toggles ♡ (Liked Songs: {was} → {not was} → {was})")
 
+        # q queues the chosen song; u shows it in Up next.
+        select("Liked Songs")
+        keys("Enter")
+        wait_text(TRAIL, "Your Library › Liked Songs")
+        deadline = time.monotonic() + 20
+        while "Liked Songs" in selected() or selected() == "":
+            assert time.monotonic() < deadline, ("Liked Songs' rows did not load", selected())
+            time.sleep(0.2)
+        keys("ArrowDown", "ArrowDown")
+        time.sleep(0.3)
+        row = selected()
+        ctl('type "q"')
+        deadline = time.monotonic() + 10
+        while True:
+            queued = [i["name"] for i in api("/queue")["items"] if i["detail"].startswith("In queue")]
+            if any(name in row for name in queued):
+                break
+            assert time.monotonic() < deadline, ("q didn't queue the chosen song", row, queued)
+            time.sleep(0.3)
+        ctl('type "u"')
+        wait_text(TRAIL, "Up next")
+        wait_text(f"{MAIN} [data-role='sp-rows']", queued[0])
+        ctl("shot spotify-up-next")
+        ctl('type "u"')
+        wait_text(TRAIL, "Your Library › Liked Songs")
+        assert not any("Up next" in t for t in texts(TRAIL)), texts(TRAIL)
+        print(f"PASS: q queues the chosen song ({queued[0]!r}); u shows it in Up next and u again closes it")
+
+        # The quality chip restarts Soloist for the other quality. Each quality has
+        # its own cache: the song cached as FLAC plays as Vorbis at 320 kbit/s.
+        mouse = "spotify:track:0aNdtLrUvMMSKZ2EqEFYJK"  # has a lossless version
+        def plays_as(codec):
+            return wait_status(lambda s: s["player"]["state"] == "ready" and s["playing"] and s["track"]
+                               and s["track"]["uri"] == mouse
+                               and (s["player"]["format"] or {}).get("codec") == codec,
+                               f"the song plays from {codec}", timeout=60)["player"]["format"]
+        assert api("/status")["player"]["quality"] == "lossless"
+        api_post("/load", {"uri": mouse})
+        flac = plays_as("flac")
+        wait_text(DOCK, "FLAC")
+        badge = f"{DOCK} .sf-badge:nth-last-child(2)"
+        assert texts(badge) == ["Quality: Lossless"], texts(badge)
+        ctl(f"click {badge}")
+        wait_text(badge, "Quality: 320 kbps")
+        vorbis = plays_as("vorbis")
+        assert vorbis["bitrate_kbps"] == 320, vorbis
+        wait_text(DOCK, "Ogg Vorbis 320 kbps")
+        ctl("shot spotify-quality-320")
+        ctl(f"click {badge}")
+        wait_text(badge, "Quality: Lossless")
+        plays_as("flac")
+        print(f"PASS: the quality chip switches Lossless ({flac}) → 320 kbps ({vorbis}) → Lossless; the same"
+              " song plays from FLAC, then Vorbis 320 (not the cached FLAC), then FLAC, and the dock says which")
+
+        print("DEBUG before", {k: api("/status")[k] for k in ("playing", "active")}, api("/status")["player"]["quality"])
         keys("Space")
+        time.sleep(2)
+        st = api("/status")
+        print("DEBUG after", st["playing"], st["player"]["quality"], st["player"]["state"], texts(f"{DOCK} .sp-play"))
+        print("DEBUG log", [l[-160:] for l in next(config.rglob("daemon.log")).read_text().splitlines()[-8:]])
         wait_status(lambda s: not s["playing"], "Space pauses")
         print("PASS: Space pauses")
 
@@ -488,4 +586,4 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
                 window.wait(timeout=20)
             daemon.terminate()
             daemon.wait(timeout=20)
-            publish(out)
+            publish(out, config)

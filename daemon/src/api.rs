@@ -12,6 +12,9 @@
 //! POST /shuffle?on=true|false
 //! POST /repeat?mode=off|context|track
 //! POST /load  {"uri": …, "track": …?}  plays a track or a context (from `track`)
+//! GET  /queue                     what plays next (a listing, like /open's)
+//! POST /queue?uri=…               adds a track to the queue
+//! POST /quality?level=lossless|very_high  the audio quality asked for
 //! GET  /search?q=…                tracks, albums, artists, playlists
 //! GET  /library                   Liked Songs, saved playlists, albums, artists
 //! GET  /open?uri=…                a playlist's, album's, artist's or Liked Songs' rows
@@ -32,7 +35,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{catalog::Catalog, engine::Engine};
+use crate::{catalog::Catalog, engine::Engine, soloist::Quality};
 
 #[derive(Clone)]
 struct App {
@@ -69,15 +72,21 @@ macro_rules! command {
             answer(&app, result)
         }
     };
+    ($name:ident, $call:ident, async) => {
+        async fn $name(State(app): State<App>) -> Response {
+            let result = app.engine.$call().await;
+            answer(&app, result)
+        }
+    };
 }
 
 command!(login, login);
-command!(toggle, toggle);
-command!(play, play);
+command!(toggle, toggle, async);
+command!(play, play, async);
 command!(pause, pause);
 command!(next, next);
 command!(prev, prev);
-command!(transfer, transfer);
+command!(transfer, transfer, async);
 
 async fn cancel_login(State(app): State<App>) -> Response {
     app.engine.cancel_login();
@@ -85,7 +94,7 @@ async fn cancel_login(State(app): State<App>) -> Response {
 }
 
 async fn logout(State(app): State<App>) -> Response {
-    app.engine.logout();
+    app.engine.logout().await;
     answer(&app, Ok(()))
 }
 
@@ -135,8 +144,30 @@ struct Load {
 }
 
 async fn load(State(app): State<App>, Json(body): Json<Load>) -> Response {
-    let result = app.engine.load(&body.uri, body.track.as_deref());
+    let result = app.engine.load(&body.uri, body.track.as_deref()).await;
     answer(&app, result)
+}
+
+async fn queue(State(app): State<App>) -> Response {
+    match app.engine.queue().await {
+        Ok(listing) => Json(listing).into_response(),
+        Err(e) => refused(StatusCode::CONFLICT, e),
+    }
+}
+
+async fn enqueue(State(app): State<App>, Query(p): Params) -> Response {
+    match param::<String>(&p, "uri") {
+        Ok(uri) => answer(&app, app.engine.enqueue(&uri)),
+        Err(e) => refused(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn quality(State(app): State<App>, Query(p): Params) -> Response {
+    let level = p.get("level").map(String::as_str).unwrap_or_default();
+    match Quality::parse(level) {
+        Some(q) => answer(&app, app.engine.set_quality(q)),
+        None => refused(StatusCode::BAD_REQUEST, format!("bad ?level={level} (lossless, very_high)")),
+    }
 }
 
 /// Answers a catalog call made with the signed-in session.
@@ -233,6 +264,8 @@ pub fn router(engine: Engine, catalog: Catalog) -> Router {
         .route("/shuffle", post(shuffle))
         .route("/repeat", post(repeat))
         .route("/load", post(load))
+        .route("/queue", get(queue).post(enqueue))
+        .route("/quality", post(quality))
         .route("/search", get(search))
         .route("/library", get(library))
         .route("/open", get(open))
