@@ -19,6 +19,26 @@ common.LOG = tern.plugin.data .. "/daemon.log"
 -- (`api-key`) go here; the daemon keeps Soloist's data and caches beside them.
 common.SOLOIST = tern.plugin.data .. "/soloist"
 
+-- What `/quality?level=` takes (daemon/src/soloist/prefs.rs `Quality`), best
+-- first: `label` and `detail` in the picker, `short` on the block's chip.
+export type Quality = { level: string, label: string, short: string, detail: string }
+common.QUALITIES = {
+	{ level = "lossless", label = "Lossless", short = "Lossless", detail = "FLAC, when Spotify has it" },
+	{ level = "very_high", label = "Very high", short = "320 kbps", detail = "Ogg Vorbis, 320 kbps" },
+	{ level = "high", label = "High", short = "160 kbps", detail = "Ogg Vorbis, 160 kbps" },
+	{ level = "normal", label = "Normal", short = "96 kbps", detail = "Ogg Vorbis, 96 kbps" },
+	{ level = "low", label = "Low", short = "24 kbps", detail = "AAC, 24 kbps" },
+} :: { Quality }
+
+function common.quality(level: string): Quality?
+	for _, q in common.QUALITIES do
+		if q.level == level then
+			return q
+		end
+	end
+	return nil
+end
+
 export type Track = {
 	uri: string,
 	name: string,
@@ -39,7 +59,7 @@ export type Player = {
 	binary: string,
 	api_key_file: string,
 	expires_in_days: number?,
-	quality: string, -- lossless | very_high (asked for)
+	quality: string, -- a `QUALITIES` level (asked for)
 	-- What the playing track is decoded from, when Soloist said.
 	format: { codec: string, bitrate_kbps: number?, sample_rate_hz: number? }?,
 }

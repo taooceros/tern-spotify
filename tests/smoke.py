@@ -18,9 +18,9 @@ into the isolated config, and links your Soloist executable and copies your API 
 up there, and your own player stopped (the port is shared). The isolated Soloist starts
 with no session of its own, so the run checks that the daemon pairs it with the
 account. It browses the library into Liked Songs and back, plays a song there, searches
-through the `/` prompt, opens an artist, plays it with `a`, queues a song, switches
-between Lossless and 320 kbps (checking the format Soloist decodes), and pauses. It
-plays a few seconds of audio.
+through the `/` prompt, opens an artist, plays it with `a`, queues a song, steps the
+quality chip's picker through every quality (checking the format Soloist decodes), and
+pauses. It plays a few seconds of audio.
 """
 import json
 import os
@@ -456,31 +456,48 @@ with tempfile.TemporaryDirectory(prefix="tern-spotify-", dir="/tmp") as temporar
         assert not any("Up next" in t for t in texts(TRAIL)), texts(TRAIL)
         print(f"PASS: q queues the chosen song ({queued[0]!r}); u shows it in Up next and u again closes it")
 
-        # The quality chip restarts Soloist for the other quality. Each quality has
-        # its own cache: the song cached as FLAC plays as Vorbis at 320 kbit/s.
+        # The quality chip opens a picker; each choice restarts Soloist. Each quality
+        # has its own cache: the song cached as FLAC plays as Vorbis at 320 kbit/s.
         mouse = "spotify:track:0aNdtLrUvMMSKZ2EqEFYJK"  # has a lossless version
         def plays_as(codec):
+            """The format the song plays from once Soloist names it (`codec`, or any)."""
             return wait_status(lambda s: s["player"]["state"] == "ready" and s["playing"] and s["track"]
-                               and s["track"]["uri"] == mouse
-                               and (s["player"]["format"] or {}).get("codec") == codec,
-                               f"the song plays from {codec}", timeout=60)["player"]["format"]
+                               and s["track"]["uri"] == mouse and s["player"]["format"]
+                               and codec in (None, s["player"]["format"]["codec"]),
+                               f"the song plays from {codec or 'a format'}", timeout=60)["player"]["format"]
         assert api("/status")["player"]["quality"] == "lossless"
         api_post("/load", {"uri": mouse})
         flac = plays_as("flac")
         wait_text(DOCK, "FLAC")
         badge = f"{DOCK} .sf-badge:nth-last-child(2)"
         assert texts(badge) == ["Quality: Lossless"], texts(badge)
-        ctl(f"click {badge}")
-        wait_text(badge, "Quality: 320 kbps")
-        vorbis = plays_as("vorbis")
-        assert vorbis["bitrate_kbps"] == 320, vorbis
-        wait_text(DOCK, "Ogg Vorbis 320 kbps")
-        ctl("shot spotify-quality-320")
-        ctl(f"click {badge}")
-        wait_text(badge, "Quality: Lossless")
+
+        def choose_quality(label, chip, level):
+            ctl(f"click {badge}")
+            time.sleep(1)
+            if label == "Very high":
+                ctl("shot spotify-quality-picker")
+            ctl(f'type "{label}"')
+            keys("Enter")
+            wait_text(badge, f"Quality: {chip}")
+            assert api("/status")["player"]["quality"] == level
+
+        played = {"lossless": flac}
+        for label, chip, level, codec, kbps in [("Very high", "320 kbps", "very_high", "vorbis", 320),
+                                                 ("High", "160 kbps", "high", "vorbis", 160),
+                                                 ("Normal", "96 kbps", "normal", "vorbis", 96),
+                                                 ("Low", "24 kbps", "low", "spac/aac", 24)]:
+            choose_quality(label, chip, level)
+            f = plays_as(codec)
+            assert f["bitrate_kbps"] == kbps, (level, f)
+            played[level] = f
+            if level == "very_high":
+                wait_text(DOCK, "Ogg Vorbis 320 kbps")
+                ctl("shot spotify-quality-320")
+        choose_quality("Lossless", "Lossless", "lossless")
         plays_as("flac")
-        print(f"PASS: the quality chip switches Lossless ({flac}) → 320 kbps ({vorbis}) → Lossless; the same"
-              " song plays from FLAC, then Vorbis 320 (not the cached FLAC), then FLAC, and the dock says which")
+        print(f"PASS: the quality chip's picker steps the same song through {played} and back to"
+              " Lossless; each plays from its own tier (not a cached one), and the dock says which")
 
         print("DEBUG before", {k: api("/status")[k] for k in ("playing", "active")}, api("/status")["player"]["quality"])
         keys("Space")

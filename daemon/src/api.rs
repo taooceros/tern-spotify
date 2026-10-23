@@ -14,7 +14,7 @@
 //! POST /load  {"uri": …, "track": …?}  plays a track or a context (from `track`)
 //! GET  /queue                     what plays next (a listing, like /open's)
 //! POST /queue?uri=…               adds a track to the queue
-//! POST /quality?level=lossless|very_high  the audio quality asked for
+//! POST /quality?level=lossless|very_high|high|normal|low  the audio quality asked for
 //! GET  /search?q=…                tracks, albums, artists, playlists
 //! GET  /library                   Liked Songs, saved playlists, albums, artists
 //! GET  /open?uri=…                a playlist's, album's, artist's or Liked Songs' rows
@@ -166,7 +166,7 @@ async fn quality(State(app): State<App>, Query(p): Params) -> Response {
     let level = p.get("level").map(String::as_str).unwrap_or_default();
     match Quality::parse(level) {
         Some(q) => answer(&app, app.engine.set_quality(q)),
-        None => refused(StatusCode::BAD_REQUEST, format!("bad ?level={level} (lossless, very_high)")),
+        None => refused(StatusCode::BAD_REQUEST, format!("bad ?level={level} (lossless, very_high, high, normal, low)")),
     }
 }
 

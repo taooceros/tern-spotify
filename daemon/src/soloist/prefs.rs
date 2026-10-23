@@ -10,7 +10,7 @@
 //!
 //! Soloist plays a file it has cached whatever the tier asks for: lowered
 //! from Lossless to 320 kbit/s, a cached song still plays as FLAC. So each
-//! quality gets its own cache directory, and the two share one size budget.
+//! quality gets its own cache directory, and they all share one size budget.
 
 use std::{
     fs,
@@ -21,7 +21,7 @@ use std::{
 
 use serde::Serialize;
 
-/// What the two caches may hold together.
+/// What the caches may hold together.
 pub const CACHE_BUDGET_MB: u64 = 2048;
 /// The smallest `--cache-size` Soloist takes.
 const CACHE_MIN_MB: u64 = 100;
@@ -33,13 +33,24 @@ pub enum Quality {
     Lossless,
     /// Ogg Vorbis at 320 kbit/s ("Very high").
     VeryHigh,
+    /// Ogg Vorbis at 160 kbit/s ("High").
+    High,
+    /// Ogg Vorbis at 96 kbit/s ("Normal").
+    Normal,
+    /// AAC at 24 kbit/s ("Low"; Soloist logs the codec as `spac/aac`).
+    Low,
 }
 
 impl Quality {
+    pub const ALL: [Quality; 5] = [Quality::Lossless, Quality::VeryHigh, Quality::High, Quality::Normal, Quality::Low];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "lossless" => Some(Quality::Lossless),
             "very_high" | "320" => Some(Quality::VeryHigh),
+            "high" | "160" => Some(Quality::High),
+            "normal" | "96" => Some(Quality::Normal),
+            "low" | "24" => Some(Quality::Low),
             _ => None,
         }
     }
@@ -48,14 +59,21 @@ impl Quality {
         match self {
             Quality::Lossless => "lossless",
             Quality::VeryHigh => "very_high",
+            Quality::High => "high",
+            Quality::Normal => "normal",
+            Quality::Low => "low",
         }
     }
 
-    /// Soloist's `audio.play_bitrate_enumeration` tier.
+    /// Soloist's `audio.play_bitrate_enumeration` tier. Soloist takes 1–5
+    /// and silently treats anything else as High.
     fn tier(self) -> u8 {
         match self {
             Quality::Lossless => 5,
             Quality::VeryHigh => 4,
+            Quality::High => 3,
+            Quality::Normal => 2,
+            Quality::Low => 1,
         }
     }
 
@@ -63,6 +81,9 @@ impl Quality {
         match self {
             Quality::Lossless => "lossless",
             Quality::VeryHigh => "320",
+            Quality::High => "160",
+            Quality::Normal => "96",
+            Quality::Low => "24",
         }
     }
 }
@@ -118,14 +139,10 @@ impl Layout {
     }
 
     /// `--cache-size` for `q`'s cache: the budget less what the other
-    /// quality's cache holds now (never under Soloist's minimum).
+    /// qualities' caches hold now (never under Soloist's minimum).
     pub fn cache_size_mb(&self, q: Quality) -> u64 {
-        let other = match q {
-            Quality::Lossless => Quality::VeryHigh,
-            Quality::VeryHigh => Quality::Lossless,
-        };
-        let used_mb = dir_size(&self.cache(other)) / (1024 * 1024);
-        CACHE_BUDGET_MB.saturating_sub(used_mb).max(CACHE_MIN_MB)
+        let used: u64 = Quality::ALL.into_iter().filter(|&o| o != q).map(|o| dir_size(&self.cache(o))).sum();
+        CACHE_BUDGET_MB.saturating_sub(used / (1024 * 1024)).max(CACHE_MIN_MB)
     }
 
     /// Writes `q`'s tier into the global and `username`'s preferences.

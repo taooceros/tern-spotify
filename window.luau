@@ -1,8 +1,9 @@
 --!strict
 -- The window half: palette commands and keys that drive the daemon without
--- the block, a status-line segment with what is playing, and the search
--- prompt the block asks for (`tern-spotify:search?pane=N`): Tern's prompt
--- field takes IME input, which a plugin block's keys don't.
+-- the block, a status-line segment with what is playing, and the search and
+-- quality pickers the block asks for (`tern-spotify:search?pane=N`,
+-- `tern-spotify:quality?pane=N`): Tern's prompt field takes IME input, which
+-- a plugin block's keys don't, and only the window has a picker.
 
 local common = require("./common")
 
@@ -171,17 +172,46 @@ local function search_prompt(cx: WindowCx, done: (q: string, cx: WindowCx) -> ()
 		end)
 end
 
--- The block's `/`: the query goes back to that block as a `search` action.
+-- Asks for one of the qualities; `current` is checked.
+local function quality_picker(cx: WindowCx, current: string, done: (q: common.Quality, cx: WindowCx) -> ())
+	local items: { PickItem } = {}
+	for i, q in common.QUALITIES do
+		items[i] = { label = q.label, detail = q.detail, current = q.level == current, index = i }
+	end
+	cx:pick({ items = items, placeholder = "Audio quality (the player restarts to change it)", action = "choose" })
+		:next(function(choice: PickItem?, _err: string?, cx2: WindowCx?)
+			if choice and cx2 then
+				done(common.QUALITIES[choice.index :: number], cx2)
+			end
+		end)
+end
+
+-- The block's `/` and its quality chip: the answer goes back to that block as
+-- a `search` or `quality` action.
 tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
 	local pane = tonumber(string.match(link.url, "^tern%-spotify:search%?pane=(%d+)$"))
-	if pane == nil then
-		return nil
+	if pane then
+		local target = pane :: number
+		search_prompt(cx, function(q: string, cx2: WindowCx)
+			cx2.session:event(target, { ev = "action", id = "main.browse", act = "search=" .. q })
+		end)
+		return { handled = true }
 	end
-	local target = pane :: number
-	search_prompt(cx, function(q: string, cx2: WindowCx)
-		cx2.session:event(target, { ev = "action", id = "main.browse", act = "search=" .. q })
-	end)
-	return { handled = true }
+	pane = tonumber(string.match(link.url, "^tern%-spotify:quality%?pane=(%d+)$"))
+	if pane then
+		local target = pane :: number
+		common.call("GET", "/status", nil, function(reply: Reply, cx2: WindowCx?)
+			local c = cx2 :: WindowCx
+			if not reply.ok then
+				return c:toast("error", "Spotify", reply.error)
+			end
+			quality_picker(c, (reply.body :: Status).player.quality, function(q: common.Quality, cx3: WindowCx)
+				cx3.session:event(target, { ev = "action", id = "main.browse", act = "quality=" .. q.level })
+			end)
+		end)
+		return { handled = true }
+	end
+	return nil
 end)
 
 tern.command({ id = "open", title = "Spotify: Open Player", icon = "play", run = open_player })
@@ -218,27 +248,17 @@ tern.command({
 	icon = "play",
 	run = function(cx: WindowCx)
 		with_daemon(cx, function(cx2: WindowCx, s: Status)
-			local levels = { "lossless", "very_high" }
-			local items: { PickItem } = {
-				{ label = "Lossless", detail = "FLAC, when Spotify has it", current = s.player.quality == "lossless", index = 1 },
-				{ label = "Very high", detail = "Ogg Vorbis, 320 kbps", current = s.player.quality == "very_high", index = 2 },
-			}
-			cx2:pick({ items = items, placeholder = "Audio quality (the player restarts to change it)", action = "choose" })
-				:next(function(choice: PickItem?, _err: string?, _cx3: WindowCx?)
-					if choice == nil then
-						return
-					end
-					local level = levels[choice.index :: number]
-					common.call("POST", "/quality?level=" .. level, nil, function(reply: Reply, cx4: WindowCx?)
-						if cx4 then
-							if reply.ok then
-								cx4:toast("success", "Spotify quality: " .. choice.label)
-							else
-								cx4:toast("error", "Spotify", reply.error)
-							end
+			quality_picker(cx2, s.player.quality, function(q: common.Quality, _cx3: WindowCx)
+				common.call("POST", "/quality?level=" .. q.level, nil, function(reply: Reply, cx4: WindowCx?)
+					if cx4 then
+						if reply.ok then
+							cx4:toast("success", "Spotify quality: " .. q.label)
+						else
+							cx4:toast("error", "Spotify", reply.error)
 						end
-					end)
+					end
 				end)
+			end)
 		end)
 	end,
 })

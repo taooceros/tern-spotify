@@ -57,8 +57,10 @@ local BUILD_TAIL = 1600
 -- then the keys of the elements holding the list).
 local LIST_KEY = "list"
 local ROW_ID = "main.browse." .. LIST_KEY .. ".i"
--- The window half's route turns this link into a search prompt for the pane.
+-- The window half's route turns these links into a search prompt and a
+-- quality picker for the pane.
 local SEARCH_LINK = "tern-spotify:search?pane="
+local QUALITY_LINK = "tern-spotify:quality?pane="
 
 local REPEAT_NEXT: { [string]: string } = { off = "context", context = "track", track = "off" }
 local REPEAT_LABEL: { [string]: string } = { off = "Repeat off", context = "Repeat all", track = "Repeat one" }
@@ -1140,10 +1142,14 @@ local KEYS = "Space play/pause · n/p next/prev · ←/→ seek · +/- volume ·
 -- One line's worth, for narrow panes; `?` shows KEYS.
 local KEYS_SHORT = "Space ⏯ · n/p ⏭⏮ · / search · y lyrics · f ♡ · ? all keys"
 
--- The quality asked for, as the chip that switches it names it.
-local QUALITY_LABEL: { [string]: string } = { lossless = "Lossless", very_high = "320 kbps" }
-local QUALITY_NEXT: { [string]: string } = { lossless = "very_high", very_high = "lossless" }
-local CODEC_LABEL: { [string]: string } = { flac = "FLAC", vorbis = "Ogg Vorbis", aac = "AAC", mp3 = "MP3" }
+-- The quality asked for, as the chip that opens its picker names it.
+local function quality_label(level: string): string
+	local q = common.quality(level)
+	return if q then q.short else level
+end
+
+-- Soloist names Low's codec `spac/aac`.
+local CODEC_LABEL: { [string]: string } = { flac = "FLAC", vorbis = "Ogg Vorbis", aac = "AAC", ["spac/aac"] = "AAC", mp3 = "MP3" }
 
 -- What the playing track is decoded from, as Soloist reported it: FLAC by
 -- its sample rate (its bitrate varies), lossy formats by their bitrate.
@@ -1203,8 +1209,8 @@ local function dock_view(state: State, s: Status): Node
 		table.insert(row, chip("Play here", "transfer", "accent"))
 	end
 	-- The quality asked for (what plays shows beside "Playing on"); a click
-	-- asks for the other, and the player restarts to take it.
-	table.insert(row, chip("Quality: " .. (QUALITY_LABEL[s.player.quality] or s.player.quality), "quality", "neutral"))
+	-- picks another, and the player restarts to take it.
+	table.insert(row, chip("Quality: " .. quality_label(s.player.quality), "quality", "neutral"))
 	table.insert(row, chip("Sign out", "logout", "neutral"))
 	local lines: { Node } = { ui.row(row) }
 	local warn = state.flash or s.error
@@ -1298,9 +1304,11 @@ local function do_action(state: State, act: string, value: string?)
 		reveal(state)
 	elseif act == "transfer" then
 		expect(state, { active = true }, "/transfer")
-	elseif act == "quality" and s then
-		local level = QUALITY_NEXT[s.player.quality] or "lossless"
-		send(state, "POST", "/quality?level=" .. level)
+	elseif act == "quality" and value then
+		-- The level chosen in the window's picker.
+		send(state, "POST", "/quality?level=" .. value)
+	elseif act == "quality" then
+		state.cx:open(QUALITY_LINK .. state.cx.pane)
 	elseif act == "enqueue" then
 		enqueue(state)
 	elseif act == "up_next" then
